@@ -752,6 +752,7 @@ function onData(data){
       st.remainingSpins=data.remainingSpins;
       document.getElementById('spinsNum').textContent=st.remainingSpins;
       if(!st.spinning)setGachaBtn(true);
+      if(st.remainingSpins<=0){const g=document.getElementById('gachaBtn'),f=document.getElementById('fastBtn');if(g){g.disabled=true;g.textContent='終了';}if(f){f.disabled=true;f.textContent='残り回数なし';}}
       break;
     case 'pin_required':
       st.pinRequired=!!data.value;
@@ -782,23 +783,31 @@ function spin(){
   st.spinning=true;st.animDone=false;st.fileDone=false;
   st.dlUrl=null;st.chunks=[];st.totalChunks=0;st.pendingHasFile=false;
   setGachaBtn(false);
-  st.conn.send({type:'spin_request'});
   showOverlay();
+  // Arm timeout before sending; some Safari/network failures throw synchronously from send().
+  clearTimeout(_spinTimeout);
   _spinTimeout=setTimeout(()=>{
-    if(st.spinning&&!st.fastMode){forceCloseOverlay();alert('タイムアウト：ホストからの返答がありませんでした。');}
-  },8000);
+    if(st.spinning&&!st.fastMode){forceCloseOverlay();alert('応答がありません。接続を確認して、もう一度お試しください。');}
+  },12000);
+  try{st.conn.send({type:'spin_request'});}
+  catch(err){
+    clearTimeout(_spinTimeout);st.spinning=false;forceCloseOverlay();
+    console.error('spin_request send failed',err);
+    alert('通信に失敗しました。接続し直してお試しください。');
+  }
 }
 
 function setGachaBtn(enabled){
   const btn=document.getElementById('gachaBtn');
   const fBtn=document.getElementById('fastBtn');
   const recv=st.batchPending>0;
-  btn.disabled=!enabled||recv;
-  if(fBtn)fBtn.disabled=btn.disabled;
+  const noSpins=Number(st.remainingSpins)<=0;
+  btn.disabled=!enabled||recv||noSpins;
+  if(fBtn)fBtn.disabled=!enabled||recv||noSpins;
   if(recv)btn.textContent='ファイル受信中...';
   else if(!enabled)btn.textContent='引いています...';
-  else if(st.remainingSpins<=0){btn.textContent='終了';btn.disabled=true;if(fBtn)fBtn.disabled=true;}
-  else btn.textContent='GACHA !';
+  else if(noSpins){btn.textContent='終了';if(fBtn)fBtn.textContent='残り回数なし';}
+  else {btn.textContent='GACHA !';if(fBtn)fBtn.textContent='まとめて引く（アニメなし）';}
 }
 
 /* ===== OVERLAY ===== */
@@ -815,51 +824,76 @@ function resetOverlay(){
   document.getElementById('cinePrizeName').textContent='';
   document.getElementById('cinePrizeText').textContent='';
   const rl=document.getElementById('resultLabel');rl.className='result-label';rl.textContent='';
-  document.getElementById('cardInner').className='card-inner';
-  document.getElementById('cardPrizeText').style.display='none';
+  // The cinematic layout replaced the old card markup. Keep legacy elements optional.
+  const legacyCard=document.getElementById('cardInner');
+  if(legacyCard)legacyCard.className='card-inner';
+  const legacyPrizeText=document.getElementById('cardPrizeText');
+  if(legacyPrizeText)legacyPrizeText.style.display='none';
+  // Always reset cinematic text opacity/animation state, including Safari after a previous reveal.
+  ['cine-eyebrow','cine-rarity','cinePrizeName','cinePrizeText'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el){el.style.animation='none';void el.offsetWidth;el.style.animation='';}
+  });
 }
-function showOverlay(){resetOverlay();const o=document.getElementById('overlay');o.classList.add('show','cine-start');}
+function showOverlay(){
+  const o=document.getElementById('overlay');
+  if(!o)return;
+  try{resetOverlay();}catch(err){console.error('overlay reset failed',err);}
+  o.classList.add('show','cine-start');
+  // Force the reveal stage to be visible on iOS Safari even if an earlier animation was interrupted.
+  o.style.display='flex';
+  o.style.opacity='1';
+  o.style.pointerEvents='auto';
+}
 
 function showCardResult(rarity,prize){
   clearTimeout(_spinTimeout);
   const overlay=document.getElementById('overlay');
-  const color=/^#[0-9a-f]{6}$/i.test(rarity.color||'')?rarity.color:'#8b75ff';
+  if(!overlay)return;
+  const color=/^#[0-9a-f]{6}$/i.test(rarity?.color||'')?rarity.color:'#8b75ff';
+  const rarityName=String(rarity?.name||'REWARD');
+  const legendary=/(ur|ssr|legend|★5|5星|最高|極|神)/i.test(rarityName);
+  const rare=legendary||/(sr|rare|★4|4星|特別|高級)/i.test(rarityName);
+  const prizeName=document.getElementById('cinePrizeName');
+  const prizeText=document.getElementById('cinePrizeText');
+  const rarityEl=document.getElementById('cineRarity');
   overlay.style.setProperty('--reveal-color',color);
   overlay.classList.remove('cine-start','cine-reveal','cine-rare','cine-legendary');
   void overlay.offsetWidth;
   overlay.classList.add('cine-start');
-  const rarityName=String(rarity.name||'REWARD');
-  const rankText=(rarityName+' '+color).toLowerCase();
-  const legendary=/(ur|ssr|legend|★5|5星|最高|極|神)/i.test(rarityName);
-  const rare=legendary||/(sr|rare|★4|4星|特別|高級)/i.test(rarityName);
   if(rare)overlay.classList.add('cine-rare');
   if(legendary)overlay.classList.add('cine-legendary');
-  const prizeName=document.getElementById('cinePrizeName');
-  const prizeText=document.getElementById('cinePrizeText');
-  document.getElementById('cineRarity').textContent=rarityName.toUpperCase()+(prize.lastOneAwarded?'  /  LAST ONE':'');
-  prizeName.textContent=prize.name||'獲得報酬';
-  const details=[prize.text,prize.lastOneAwarded?prize.lastOneText:null].filter(Boolean).join('\n\n');
-  prizeText.textContent=details;
-  prizeText.style.display=details?'block':'none';
-  // Reveal pacing: short anticipation, then a cinematic light burst and the reward title.
+  if(rarityEl)rarityEl.textContent=rarityName.toUpperCase()+(prize?.lastOneAwarded?'  /  LAST ONE':'');
+  if(prizeName)prizeName.textContent=String(prize?.name||'獲得報酬');
+  const details=[prize?.text,prize?.lastOneAwarded?prize?.lastOneText:null].filter(Boolean).join('\n\n');
+  if(prizeText){prizeText.textContent=details;prizeText.style.display=details?'block':'none';}
+  overlay.classList.add('show');
+  overlay.style.display='flex';overlay.style.opacity='1';overlay.style.pointerEvents='auto';
+
+  const revealDelay=legendary?1550:rare?1150:820;
   setTimeout(()=>{
     if(!overlay.classList.contains('show'))return;
-    overlay.classList.remove('cine-start');
-    overlay.classList.add('cine-reveal');
-    if(legendary){playSound(true);spawnParticles(innerWidth/2,innerHeight*.43,color,100);}
-    else {playSound(true);spawnParticles(innerWidth/2,innerHeight*.43,color,rare?58:28);}
-    const flash=document.getElementById('flashEl');
-    flash.style.background=`radial-gradient(circle at 50% 43%,#fff 0%,${color} 18%,transparent 72%)`;
-    flash.style.opacity=legendary?'0.72':rare?'0.42':'0.22';
-    setTimeout(()=>{flash.style.opacity='0';},legendary?220:120);
-    const sl=document.getElementById('scanLine');
-    sl.style.background=`linear-gradient(90deg,transparent,${color},#fff,${color},transparent)`;
-    sl.classList.remove('go');void sl.offsetWidth;sl.classList.add('go');
-    if(prize.lastOneAwarded)showSpecialToast('ラストワン賞 獲得！');
-    st.animDone=true;tryShowDl();
-  },legendary?1550:rare?1150:820);
+    try{
+      overlay.classList.remove('cine-start');
+      overlay.classList.add('cine-reveal');
+      if(typeof playSound==='function')playSound(true);
+      if(typeof spawnParticles==='function')spawnParticles(window.innerWidth/2,window.innerHeight*.43,color,legendary?100:rare?58:28);
+      const flash=document.getElementById('flashEl');
+      if(flash){
+        flash.style.background=`radial-gradient(circle at 50% 43%,#fff 0%,${color} 18%,transparent 72%)`;
+        flash.style.opacity=legendary?'0.72':rare?'0.42':'0.22';
+        setTimeout(()=>{flash.style.opacity='0';},legendary?220:120);
+      }
+      const sl=document.getElementById('scanLine');
+      if(sl){sl.style.background=`linear-gradient(90deg,transparent,${color},#fff,${color},transparent)`;sl.classList.remove('go');void sl.offsetWidth;sl.classList.add('go');}
+      if(prize?.lastOneAwarded&&typeof showSpecialToast==='function')showSpecialToast(`${prize.lastOneName||'ラストワン賞'} 獲得！`);
+    }catch(err){console.error('cinematic reveal effect failed',err);}
+    finally{
+      st.animDone=true;
+      tryShowDl();
+    }
+  },revealDelay);
 }
-
 function finishStalledFile(message='ファイル受信がタイムアウトしました'){
   clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
   if(!st.curPid)return;
@@ -978,7 +1012,7 @@ function nextSpin(){
   st.chunks=[];st.totalChunks=0;st.pendingHasFile=false;st.spinning=true;
   setGachaBtn(false);
   _spinTimeout=setTimeout(()=>{
-    if(st.spinning&&!st.fastMode){forceCloseOverlay();alert('タイムアウト：ホストからの返答がありませんでした。');}
+    if(st.spinning&&!st.fastMode){forceCloseOverlay();alert('応答がありません。接続状態を確認してください。');}
   },8000);
   st.conn.send({type:'spin_request'});
 }
@@ -1009,14 +1043,20 @@ function startFastSpin(){
   document.getElementById('fastSub').textContent='結果を受け取っています';
   document.getElementById('fastCancel').style.display='none';
   showScreen('screen-spinning');
-  st.conn.send({type:'batch_request'});
   clearTimeout(_spinTimeout);
   _spinTimeout=setTimeout(()=>{
     if(st.fastMode){
-      document.getElementById('fastSub').textContent='応答に時間がかかっています';
+      document.getElementById('fastSub').textContent='ホストから応答がありません。接続を確認してください。';
       document.getElementById('fastCancel').style.display='';
     }
-  },10000);
+  },12000);
+  try{st.conn.send({type:'batch_request'});}
+  catch(err){
+    clearTimeout(_spinTimeout);st.fastMode=false;st.spinning=false;
+    showScreen('screen-gacha');setGachaBtn(true);
+    console.error('batch_request send failed',err);
+    alert('まとめ引きの通信に失敗しました。接続し直してください。');
+  }
 }
 
 function skipToFast(){startFastSpin();}
@@ -1030,6 +1070,12 @@ function cancelFastMode(){
 
 function onBatchResult(d){
   clearTimeout(_spinTimeout);st.fastMode=false;st.spinning=false;
+  // Update the authoritative remaining count immediately, before any rendering/storage work.
+  if(Number.isFinite(Number(d.remainingSpins))){
+    st.remainingSpins=Math.max(0,Number(d.remainingSpins));
+    const spinsNode=document.getElementById('spinsNum');
+    if(spinsNode)spinsNode.textContent=String(st.remainingSpins);
+  }
   st.sessionId='sess-'+Date.now();
   st.sessionLabel=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
   st.batchId=Date.now();
@@ -1056,6 +1102,14 @@ function onBatchResult(d){
   if(d.lastOneSeq?.some(Boolean))showSpecialToast(`${d.lastOneName||'ラストワン賞'} 獲得！`);
   showResults();
   setGachaBtn(true);
+  // Force disabled state if the host says no spins remain; also sync visible count after render.
+  const spinsNode=document.getElementById('spinsNum');
+  if(spinsNode)spinsNode.textContent=String(st.remainingSpins);
+  if(st.remainingSpins<=0){
+    const g=document.getElementById('gachaBtn'),f=document.getElementById('fastBtn');
+    if(g){g.disabled=true;g.textContent='終了';}
+    if(f){f.disabled=true;f.textContent='残り回数なし';}
+  }
 }
 
 // ファイルが1つ届くたびに結果画面を更新。全部届いたらZIPを作る

@@ -814,6 +814,7 @@ function handleSpin(conn){
   const bEvery=parseInt(document.getElementById('bonusEvery').value)||null;
   const bFree=parseInt(document.getElementById('bonusFree').value)||null;
   if(bEvery>0&&bFree>0&&bFree<bEvery&&l.spinsUsed%bEvery===0){bonusAwarded=bFree;l.remainingSpins+=bonusAwarded;}
+  saveListenerBalances();
   conn.send({
     type:'spin_result',rarity:{name:result.rarity.name,color:result.rarity.color},
     prize:{pid:result.prize.id,name:result.prize.name,text:result.prize.text,hasFile:!!(result.prize.file&&result.prize.file.arrayBuffer),
@@ -847,6 +848,8 @@ function handleBatch(conn){
   if(!l||l.remainingSpins<=0){conn.send({type:'spin_denied',message:'残り回数がありません'});return;}
   const{picks,bonusTotal}=drawBatch(l,bonusParams());
   if(!picks.length){conn.send({type:'spin_denied',message:'景品が登録されていません'});return;}
+  // Commit the authoritative remaining balance before the guest receives results or can reconnect.
+  saveListenerBalances();
   const table=[],index=new Map(),files=[];
   const lastOneSeq=[];
   const seq=picks.map(({rarity,prize,lastOneAwarded})=>{
@@ -860,7 +863,11 @@ function handleBatch(conn){
     }
     return index.get(prize.id);
   });
+  // Persist the new balance and bounded log before replying; reconnects must never restore stale spins.
+  // saveState() writes the independent balance ledger first.
+  saveState();
   conn.send({type:'batch_result',table,seq,lastOneSeq,lastOneName:state.lastOneName,lastOneText:state.lastOneText,remainingSpins:l.remainingSpins,bonusTotal});
+  conn.send({type:'spins_update',remainingSpins:l.remainingSpins});
 
   // 大量抽選時に addLog() を5000回 unshift すると O(n²) になるため一括追加。
   // 表示はrenderLog()側で最新300件に制限されるので、ログ全件はstateに保持。
@@ -1119,6 +1126,7 @@ function updateStats(){
 
 /* ===== INDEXEDDB + LOCALSTORAGE ===== */
 const LS_KEY='gacha-host-v2';
+const BALANCE_KEY='gacha-host-balances-v1';
 const DB_NAME='gacha-host-db';
 const DB_STORE='files';
 const EVENT_STORE='events';
@@ -1153,7 +1161,48 @@ function dbClearAll(){
     tx.objectStore(DB_STORE).clear();tx.oncomplete=res;tx.onerror=rej;});
 }
 
+function saveListenerBalances(){
+  // Keep the authoritative balances in a small, independent localStorage record.
+  // This must be written before sending batch results to guests.
+  try{
+    const balances={};
+    for(const [name,l] of Object.entries(state.listeners||{})){
+      balances[name]={
+        remainingSpins:Math.max(0,Number(l.remainingSpins)||0),
+        spinsUsed:Math.max(0,Number(l.spinsUsed)||0),
+        wonPrizeIds:Array.isArray(l.wonPrizeIds)?l.wonPrizeIds:[],
+        pin:l.pin||null
+      };
+    }
+    localStorage.setItem(BALANCE_KEY,JSON.stringify({version:1,balances,savedAt:Date.now()}));
+    return true;
+  }catch(e){
+    console.error('Could not persist listener balances',e);
+    return false;
+  }
+}
+
+function mergeSavedBalances(listeners){
+  try{
+    const raw=localStorage.getItem(BALANCE_KEY);
+    if(!raw)return listeners;
+    const saved=JSON.parse(raw);
+    const balances=saved&&saved.balances;
+    if(!balances||typeof balances!=='object')return listeners;
+    for(const [name,b] of Object.entries(balances)){
+      if(!listeners[name]||!b||!Number.isFinite(Number(b.remainingSpins)))continue;
+      listeners[name].remainingSpins=Math.max(0,Number(b.remainingSpins));
+      listeners[name].spinsUsed=Math.max(0,Number(b.spinsUsed)||0);
+      if(Array.isArray(b.wonPrizeIds))listeners[name].wonPrizeIds=b.wonPrizeIds;
+      if(b.pin)listeners[name].pin=b.pin;
+    }
+    return listeners;
+  }catch(e){console.warn('Could not restore listener balance ledger',e);return listeners;}
+}
+
 function saveState(){
+  // Persist balances independently before the larger settings/log blob.
+  saveListenerBalances();
   try{
     const data={
       costPerSpin:parseInt(document.getElementById('costPerSpin').value)||100,
@@ -1162,7 +1211,7 @@ function saveState(){
       pinEnabled:state.pinEnabled,uniquePerListener:state.uniquePerListener,features:{...state.features},
       lastOneEnabled:state.lastOneEnabled,lastOneName:state.lastOneName,lastOneText:state.lastOneText,lastOneClaimed:state.lastOneClaimed,
       eventGauge:{...state.eventGauge},winCount:state.winCount,
-      log:state.log.map(e=>({name:e.name,t:e.t,rarity:{name:e.rarity?.name||'',color:e.rarity?.color||'#888888'},prize:{id:e.prize?.id||e.prize?.pid||null,name:e.prize?.name||'',text:e.prize?.text||''},lastOneAwarded:!!e.lastOneAwarded})),
+      log:state.log.slice(0,300).map(e=>({name:e.name,t:e.t,rarity:{name:e.rarity?.name||'',color:e.rarity?.color||'#888888'},prize:{id:e.prize?.id||e.prize?.pid||null,name:e.prize?.name||'',text:e.prize?.text||''},lastOneAwarded:!!e.lastOneAwarded})),
       rarities:state.rarities.map(r=>({
         id:r.id,name:r.name,color:r.color,rate:r.rate,
         prizes:r.prizes.map(p=>({
@@ -1230,6 +1279,9 @@ async function loadState(){
     state.listeners=Object.fromEntries(
       Object.entries(data.listeners||{}).map(([k,v])=>[k,{remainingSpins:v.remainingSpins,spinsUsed:v.spinsUsed||0,pin:v.pin||null,peerId:null,wonPrizeIds:Array.isArray(v.wonPrizeIds)?v.wonPrizeIds:[]}])
     );
+    // The independent balance ledger is newer/more authoritative than the older full-state blob.
+    state.listeners=mergeSavedBalances(state.listeners);
+    saveListenerBalances();
     renderRarities();renderListeners();renderLog();updateStats();renderHostGauge();
     if(state.rarities.length)toast('前回の設定を復元しました');
   }catch(e){console.warn('loadState failed:',e);}
@@ -1238,6 +1290,7 @@ async function loadState(){
 async function resetAll(){
   if(!confirm('すべての設定・景品ファイル・リスナー情報をリセットしますか？'))return;
   localStorage.removeItem(LS_KEY);
+  localStorage.removeItem(BALANCE_KEY);
   await dbClearAll().catch(()=>{});
   state.rarities=[];state.listeners={};state.log=[];state.winCount=0;
   state.bonusEvery=null;state.bonusFree=null;state.pinEnabled=false;
