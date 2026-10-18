@@ -99,6 +99,14 @@ button:focus-visible,summary:focus-visible{outline:3px solid var(--cyan);outline
 .rarity-body.open{display:block;}
 .prize-entry{display:flex;align-items:center;gap:6px;padding:7px 9px;background:#fff;border:1px solid #EEF0F5;border-radius:6px;margin-bottom:5px;font-size:13px;}
 .prize-entry-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.prize-thumb{width:48px;height:48px;object-fit:contain;background:#F4F6FA;border:1px solid var(--border);border-radius:6px;cursor:zoom-in;flex-shrink:0;}
+.image-preview-box{display:none;margin-top:8px;padding:8px;border:1px dashed var(--border);border-radius:8px;background:#F8FAFD;}
+.image-preview-box img{display:block;max-width:100%;max-height:220px;object-fit:contain;margin:0 auto;border-radius:6px;cursor:zoom-in;}
+.image-preview-caption{font-size:11px;color:var(--text-dim);text-align:center;margin-top:4px;}
+.image-preview-modal{position:fixed;inset:0;z-index:9999;background:rgba(10,14,25,.88);display:none;align-items:center;justify-content:center;padding:18px;}
+.image-preview-modal.open{display:flex;}
+.image-preview-modal img{max-width:100%;max-height:88vh;object-fit:contain;border-radius:8px;}
+.image-preview-close{position:absolute;top:14px;right:14px;border:0;border-radius:999px;background:#fff;color:#17203A;font-size:22px;width:42px;height:42px;cursor:pointer;}
 .prize-tag{font-size:11px;padding:2px 7px;border-radius:4px;white-space:nowrap;background:#EEF2FD;color:var(--cyan);max-width:130px;overflow:hidden;text-overflow:ellipsis;}
 .tag-file{background:#EEF2FD;color:var(--cyan);}
 .tag-text{background:#FFF4D6;color:var(--gold);}
@@ -225,25 +233,6 @@ label{color:#8f98b3}
 .toast{background:#fff;color:#10131d;box-shadow:0 8px 30px rgba(0,0,0,.3)}
 ::-webkit-scrollbar-thumb{background:#394157}
 
-
-/* ===== RARITY SEARCH + IMAGE PREVIEW ===== */
-.rarity-overview{font-size:11px;color:var(--text-dim);margin:-3px 0 10px;display:flex;flex-wrap:wrap;gap:6px 12px}
-.rarity-search{margin-bottom:10px!important}
-.rarity-search input{font-size:13px!important}
-.prize-entry{flex-wrap:wrap;}
-.prize-preview-button{width:58px;height:58px;flex:0 0 58px;display:flex;align-items:center;justify-content:center;padding:3px;border:1px solid #3b4258;border-radius:8px;background:#0b0e17;cursor:zoom-in;overflow:hidden}
-.prize-preview-button img{display:block;width:100%;height:100%;object-fit:contain;border-radius:5px}
-.prize-preview-fallback{width:58px;height:58px;flex:0 0 58px;display:flex;align-items:center;justify-content:center;border:1px dashed #3b4258;border-radius:8px;color:var(--text-dim);font-size:10px;text-align:center;padding:4px}
-.prize-entry-name{min-width:70px}
-#prizeImagePreview{position:fixed;inset:0;z-index:10000;display:none;align-items:center;justify-content:center;padding:20px;background:rgba(2,4,10,.92);backdrop-filter:blur(10px)}
-#prizeImagePreview.show{display:flex}
-.prize-preview-dialog{position:relative;display:flex;flex-direction:column;align-items:center;gap:12px;width:min(94vw,900px);height:min(92vh,900px);padding:18px;background:linear-gradient(145deg,#171c2d,#0b0e17);border:1px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 25px 90px rgba(0,0,0,.6)}
-.prize-preview-heading{max-width:100%;padding:0 40px;color:#fff;font-size:15px;font-weight:900;text-align:center;overflow-wrap:anywhere}
-.prize-preview-filename{max-width:100%;color:#929bb6;font-size:12px;text-align:center;overflow-wrap:anywhere}
-#prizePreviewFullImage{display:block;max-width:100%;max-height:calc(100% - 66px);min-height:0;object-fit:contain;border-radius:8px;flex:1}
-.prize-preview-close{position:absolute;right:10px;top:10px;width:34px;height:34px;border:1px solid rgba(255,255,255,.18);border-radius:50%;background:#252b40;color:#fff;font-size:18px;cursor:pointer}
-@media(max-width:767px){.prize-preview-dialog{height:min(88dvh,900px);padding:14px}.prize-preview-button,.prize-preview-fallback{width:52px;height:52px;flex-basis:52px}}
-
 </style>
 </head>
 <body>
@@ -305,8 +294,6 @@ label{color:#8f98b3}
 
     <div class="card">
       <div class="card-title">レアリティ一覧</div>
-      <div id="rarityOverview" class="rarity-overview">レアリティ 0 · 景品 0 · 画像付き 0</div>
-      <div class="fg rarity-search"><input id="raritySearch" type="text" placeholder="レアリティ名・景品名で検索" aria-label="レアリティ名・景品名で検索" oninput="renderRarities()"></div>
       <div id="rarityList"><div class="empty">レアリティがありません</div></div>
     </div>
 
@@ -527,7 +514,6 @@ async function removeRarity(id){
   if(r){
     for(const p of r.prizes){
       if(p.file)await dbDeleteFile('f-'+p.id).catch(()=>{});
-      revokePrizePreviewUrl(p.id);
     }
   }
   state.rarities=state.rarities.filter(r=>r.id!==id);
@@ -536,76 +522,17 @@ async function removeRarity(id){
 
 function toggleBody(id){
   const el=document.getElementById('rb-'+id);
-  if(el)el.classList.toggle('open');
+  el.classList.toggle('open');
 }
-
-// 画像プレビュー用URLを使い回し、一覧の再描画でメモリが増え続けないようにする。
-const prizePreviewUrlCache=new Map();
-function revokePrizePreviewUrl(pid){
-  const key=String(pid);
-  const cached=prizePreviewUrlCache.get(key);
-  if(cached){URL.revokeObjectURL(cached.url);prizePreviewUrlCache.delete(key);}
-}
-function cleanupPrizePreviewUrls(){
-  for(const [pid,cached] of prizePreviewUrlCache){
-    let prize=null;
-    for(const rarity of state.rarities){prize=rarity.prizes.find(p=>String(p.id)===String(pid));if(prize)break;}
-    if(!prize||!prize.file||!prize.file.mimeType?.startsWith('image/')||!prize.file.arrayBuffer||cached.buffer!==prize.file.arrayBuffer||cached.mime!==prize.file.mimeType){
-      URL.revokeObjectURL(cached.url);prizePreviewUrlCache.delete(pid);
-    }
-  }
-}
-function getPrizePreviewUrl(prize){
-  if(!prize?.file?.arrayBuffer||!prize.file.mimeType?.startsWith('image/'))return '';
-  const pid=String(prize.id),mime=prize.file.mimeType,buffer=prize.file.arrayBuffer;
-  const cached=prizePreviewUrlCache.get(pid);
-  if(cached&&cached.buffer===buffer&&cached.mime===mime)return cached.url;
-  if(cached)URL.revokeObjectURL(cached.url);
-  try{
-    const url=URL.createObjectURL(new Blob([buffer],{type:mime}));
-    prizePreviewUrlCache.set(pid,{url,buffer,mime});
-    return url;
-  }catch(e){console.warn('Image preview URL creation failed:',e);return '';}
-}
-function openPrizeImagePreview(rid,pid){
-  const rarity=state.rarities.find(r=>String(r.id)===String(rid));
-  const prize=rarity?.prizes.find(p=>String(p.id)===String(pid));
-  const url=getPrizePreviewUrl(prize);
-  if(!prize||!url){toast('この景品の画像プレビューは利用できません');return;}
-  document.getElementById('prizePreviewHeading').textContent=`${rarity.name} · ${prize.name}`;
-  document.getElementById('prizePreviewFilename').textContent=prize.file.name||'画像ファイル';
-  const img=document.getElementById('prizePreviewFullImage');img.src=url;img.alt=prize.name+' のプレビュー';
-  const modal=document.getElementById('prizeImagePreview');modal.classList.add('show');modal.setAttribute('aria-hidden','false');
-}
-function closePrizeImagePreview(){
-  const modal=document.getElementById('prizeImagePreview');if(!modal)return;
-  modal.classList.remove('show');modal.setAttribute('aria-hidden','true');
-  const img=document.getElementById('prizePreviewFullImage');if(img)img.removeAttribute('src');
-}
-function clearRaritySearch(){const input=document.getElementById('raritySearch');if(input)input.value='';renderRarities();}
 
 function renderRarities(){
   const el=document.getElementById('rarityList');
   const total=state.rarities.reduce((s,r)=>s+r.rate,0);
   updateRateMeter(total);
-  cleanupPrizePreviewUrls();
-  const allPrizes=state.rarities.flatMap(r=>r.prizes);
-  const imageCount=allPrizes.filter(p=>p.file?.mimeType?.startsWith('image/')).length;
-  const overview=document.getElementById('rarityOverview');
-  if(overview)overview.textContent=`レアリティ ${state.rarities.length} · 景品 ${allPrizes.length} · 画像付き ${imageCount}`;
   if(!state.rarities.length){el.innerHTML='<div class="empty">レアリティがありません</div>';return;}
-  const query=(document.getElementById('raritySearch')?.value||'').trim().toLocaleLowerCase();
-  const visibleRarities=state.rarities.filter(r=>{
-    if(!query)return true;
-    return [r.name,...r.prizes.flatMap(p=>[p.name,p.text,p.file?.name||''])].some(v=>String(v||'').toLocaleLowerCase().includes(query));
-  });
-  if(!visibleRarities.length){
-    el.innerHTML='<div class="empty">検索条件に一致する景品がありません<br><button class="btn btn-ghost btn-sm" style="margin-top:10px;" onclick="clearRaritySearch()">検索をクリア</button></div>';
-    return;
-  }
-  el.innerHTML=visibleRarities.map(r=>`
+  el.innerHTML=state.rarities.map(r=>`
     <div class="rarity-block">
-      <div class="rarity-header" onclick="toggleBody(${r.id})" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleBody(${r.id})}">
+      <div class="rarity-header" onclick="toggleBody(${r.id})">
         <div class="rarity-dot" style="background:${r.color};"></div>
         <span class="rarity-name">${esc(r.name)}</span>
         <span class="rarity-rate-badge">${r.rate}%</span>
@@ -613,20 +540,15 @@ function renderRarities(){
         <button class="icon-btn" onclick="event.stopPropagation();removeRarity(${r.id})">削除</button>
       </div>
       <div class="rarity-body" id="rb-${r.id}">
-        ${r.prizes.map(p=>{
-          const previewUrl=p.file?.mimeType?.startsWith('image/')?getPrizePreviewUrl(p):'';
-          const preview=previewUrl?`<button class="prize-preview-button" type="button" title="画像を拡大：${esc(p.name)}" aria-label="${esc(p.name)}の画像を拡大" onclick="openPrizeImagePreview(${r.id},${p.id})"><img src="${previewUrl}" alt="${esc(p.name)}" loading="lazy"></button>`:
-            (p.file?.mimeType?.startsWith('image/')?'<div class="prize-preview-fallback">画像<br>未読込</div>':'');
-          return `
+        ${r.prizes.map(p=>`
           <div class="prize-entry">
-            ${preview}
-            <span class="prize-entry-name" title="${esc(p.name)}">${esc(p.name)}</span>
-            ${p.text?`<span class="prize-tag tag-text" title="メッセージあり">テキスト</span>`:''}
-            ${p.file?`<span class="prize-tag tag-file" title="${esc(p.file.name)}">${esc(p.file.name)}</span>`:''}
+            ${p.file&&p.file.mimeType&&p.file.mimeType.startsWith('image/')?`<img class="prize-thumb" id="prize-thumb-${p.id}" alt="${esc(p.name)}の画像プレビュー" title="クリックして拡大" onclick="openImagePreview(this.src)" style="display:none;">`:''}
+            <span class="prize-entry-name">${esc(p.name)}</span>
+            ${p.text?`<span class="prize-tag tag-text">テキスト</span>`:''}
+            ${p.file?`<span class="prize-tag tag-file">${esc(p.file.name)}</span>`:''}
             <label style="display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap;color:var(--text-dim);">在庫<input type="number" min="0" step="1" value="${p.stock===null||p.stock===undefined?'':p.stock}" placeholder="∞" title="空欄=無制限" onchange="updatePrizeStock(${r.id},${p.id},this.value)" style="width:68px;padding:4px 5px;font-size:12px;"></label>
             <button class="icon-btn" onclick="removePrize(${r.id},${p.id})">削除</button>
-          </div>`;
-        }).join('')}
+          </div>`).join('')}
         ${!r.prizes.length?'<div style="font-size:11px;color:var(--text-dim);padding:4px 0 8px;">景品が未登録です</div>':''}
         <div class="add-prize-form">
           <div class="add-prize-title">＋ 景品を追加</div>
@@ -635,15 +557,57 @@ function renderRarities(){
           <div class="fg">
             <label>ファイル（任意・ZIP / PNG / PDF など）</label>
             <div class="file-wrap">
-              <input type="file" id="pf-${r.id}" onchange="updateFileLabel(this,'pfl-${r.id}')">
+              <input type="file" id="pf-${r.id}" onchange="updateFileLabel(this,'pfl-${r.id}');previewSelectedFile(this,'pnew-${r.id}')">
               <div class="file-display" id="pfl-${r.id}">クリックして選択（なくてもOK）</div>
             </div>
+            <div class="image-preview-box" id="pnew-${r.id}"><img alt="選択した画像のプレビュー" onclick="openImagePreview(this.src)"><div class="image-preview-caption">画像プレビュー（タップで拡大）</div></div>
           </div>
           <button class="btn btn-primary" style="width:100%;padding:8px;" onclick="addPrize(${r.id})">景品を追加</button>
         </div>
       </div>
     </div>`).join('');
+  loadRegisteredImagePreviews();
 }
+
+async function loadRegisteredImagePreviews(){
+  for(const r of state.rarities){
+    for(const p of r.prizes){
+      if(!p.file||!String(p.file.mimeType||'').startsWith('image/')||!p.file.arrayBuffer)continue;
+      const img=document.getElementById('prize-thumb-'+p.id);
+      if(!img)continue;
+      try{
+        // stripExif はPNG以外をJPEGに再エンコードするため、実データに合わせる。
+        const mime=p.file.mimeType==='image/png'?'image/png':'image/jpeg';
+        const url=URL.createObjectURL(new Blob([p.file.arrayBuffer],{type:mime}));
+        img.onload=()=>URL.revokeObjectURL(url);
+        img.onerror=()=>{URL.revokeObjectURL(url);img.style.display='none';};
+        img.src=url;img.style.display='block';
+      }catch(e){console.warn('Image preview failed:',e);}
+    }
+  }
+}
+
+function previewSelectedFile(input,boxId){
+  const box=document.getElementById(boxId);if(!box)return;
+  const img=box.querySelector('img');
+  if(img.dataset.previewUrl){URL.revokeObjectURL(img.dataset.previewUrl);delete img.dataset.previewUrl;}
+  const file=input.files&&input.files[0];
+  if(!file||!file.type.startsWith('image/')){box.style.display='none';return;}
+  const url=URL.createObjectURL(file);img.dataset.previewUrl=url;img.src=url;box.style.display='block';
+}
+
+function openImagePreview(src){
+  if(!src)return;
+  const modal=document.getElementById('imagePreviewModal');
+  document.getElementById('imagePreviewModalImg').src=src;
+  modal.classList.add('open');modal.setAttribute('aria-hidden','false');
+}
+function closeImagePreview(){
+  const modal=document.getElementById('imagePreviewModal');
+  modal.classList.remove('open');modal.setAttribute('aria-hidden','true');
+  document.getElementById('imagePreviewModalImg').src='';
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeImagePreview();});
 
 function updateFileLabel(input,labelId){
   const el=document.getElementById(labelId);
@@ -652,9 +616,9 @@ function updateFileLabel(input,labelId){
 }
 
 async function stripExif(file){
-  // JPEG / PNG はCanvasで再エクスポートしてEXIF等のメタデータを消去。
-  // GIF / WebP / AVIF / SVGなどは形式やアニメーションを壊さないよう元データを保持。
-  if(!['image/jpeg','image/png'].includes(file.type))return file.arrayBuffer();
+  // 画像ファイルのみCanvasで再エクスポートしてEXIF等のメタデータを消去
+  // PDF・ZIP等の非画像はそのまま返す
+  if(!file.type.startsWith('image/'))return file.arrayBuffer();
   return new Promise((resolve,reject)=>{
     const url=URL.createObjectURL(file);
     const img=new Image();
@@ -700,7 +664,6 @@ async function removePrize(rid,pid){
   const r=state.rarities.find(x=>x.id===rid);if(!r)return;
   const prize=r.prizes.find(p=>p.id===pid);
   if(prize?.file)await dbDeleteFile('f-'+pid).catch(()=>{});
-  revokePrizePreviewUrl(pid);
   r.prizes=r.prizes.filter(p=>p.id!==pid);
   renderRarities();updateStats();saveState();broadcastPrizeCatalog();
   setTimeout(()=>{const rb=document.getElementById('rb-'+rid);if(rb)rb.classList.add('open');},50);
@@ -1516,8 +1479,6 @@ function broadcastSettingsToGuests(){
   });
 }
 
-document.addEventListener('keydown',function(event){if(event.key==='Escape')closePrizeImagePreview();});
-
 document.getElementById('costPerSpin').addEventListener('change',function(){
   state.costPerSpin=parseInt(this.value)||100;
   saveState();updateSpinsPreview();broadcastSettingsToGuests();
@@ -1554,15 +1515,9 @@ if(window.innerWidth<768){
   document.querySelector('.sidebar').classList.add('mob-active');
 }
 </script>
-
-<div id="prizeImagePreview" aria-hidden="true" role="dialog" aria-modal="true" aria-label="景品画像プレビュー" onclick="if(event.target===this)closePrizeImagePreview()">
-  <div class="prize-preview-dialog" role="document">
-    <button class="prize-preview-close" type="button" aria-label="閉じる" onclick="closePrizeImagePreview()">×</button>
-    <div id="prizePreviewHeading" class="prize-preview-heading"></div>
-    <div id="prizePreviewFilename" class="prize-preview-filename"></div>
-    <img id="prizePreviewFullImage" alt="景品画像の拡大プレビュー">
-  </div>
+<div class="image-preview-modal" id="imagePreviewModal" role="dialog" aria-modal="true" aria-label="画像プレビュー" aria-hidden="true" onclick="if(event.target===this)closeImagePreview()">
+  <button type="button" class="image-preview-close" onclick="closeImagePreview()" aria-label="閉じる">×</button>
+  <img id="imagePreviewModalImg" alt="画像プレビュー拡大表示">
 </div>
-
 </body>
 </html>
