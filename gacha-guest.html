@@ -323,6 +323,40 @@ body{
 /* A hidden fixed overlay must never leave descendants able to intercept taps. */
 #overlay:not(.show),#overlay:not(.show) *{pointer-events:none!important;}
 
+
+
+/* ===== ACCESSIBILITY / SAFARI VISIBILITY PATCH ===== */
+.name-input,
+.name-input:focus,
+.name-input:-webkit-autofill,
+.name-input:-webkit-autofill:focus{
+  color:#f4f6ff !important;
+  -webkit-text-fill-color:#f4f6ff !important;
+  background-color:#0a0d16 !important;
+  caret-color:#ff3d71;
+}
+.name-input::placeholder{color:#818ba7 !important;opacity:1;}
+.name-input:focus{border-color:var(--pink) !important;}
+.name-input:-webkit-autofill,
+.name-input:-webkit-autofill:focus{
+  -webkit-box-shadow:0 0 0 1000px #0a0d16 inset !important;
+}
+#overlay.show .again-btn.ready,
+#overlay.show .to-results-btn.ready{
+  color:#111522 !important;
+  -webkit-text-fill-color:#111522 !important;
+  background:#f5f7ff !important;
+  opacity:1 !important;
+  visibility:visible !important;
+  pointer-events:auto !important;
+  touch-action:manipulation;
+  -webkit-appearance:none;
+  appearance:none;
+  text-shadow:none !important;
+}
+#overlay .again-btn:disabled,
+#overlay .to-results-btn:disabled{pointer-events:none !important;}
+
 </style>
 </head>
 <body>
@@ -626,46 +660,145 @@ function clearCachedResults(){try{localStorage.removeItem(RESULT_CACHE_KEY);}cat
 /* ===== CONNECTION ===== */
 const params=new URLSearchParams(location.search);
 const roomId=params.get('room');
-let _reconnecting=false;
+let _connectionGeneration=0;
+let _connectAttempts=0;
+let _connectTimer=null;
+let _reconnectTimer=null;
+const MAX_AUTO_CONNECT_ATTEMPTS=3;
 
-window.onload=async()=>{
-  await openHistDb().catch(()=>{});
-  const hasHist=await checkHistoryExists().catch(()=>false);
-  document.getElementById('histBtn').style.display='';
+// Do not wait for IndexedDB before connecting. Some Safari storage states can leave
+// an IndexedDB open request pending, which previously kept the initial spinner forever.
+window.onload=()=>{
+  const histBtn=document.getElementById('histBtn');
+  if(histBtn)histBtn.style.display='';
   if(!roomId){showError('URLにルームIDがありません。\nライバーから受け取ったURLを開いてください。');return;}
   connect();
+  openHistDb()
+    .then(()=>checkHistoryExists())
+    .then(hasHist=>{if(hasHist&&histBtn)histBtn.style.display='';})
+    .catch(err=>console.warn('history database unavailable; connection will continue:',err));
 };
 
+function clearConnectionTimer(){
+  if(_connectTimer){clearTimeout(_connectTimer);_connectTimer=null;}
+}
+
 function connect(){
-  if(st.peer&&!st.peer.destroyed)st.peer.destroy();
-  st.peer=null;st.conn=null;
-  setConnText('ルームに接続中...');
-  const peer=new Peer({debug:0});
+  clearConnectionTimer();
+  if(_reconnectTimer){clearTimeout(_reconnectTimer);_reconnectTimer=null;}
+
+  // Invalidate callbacks from any previous peer/connection before closing them.
+  const generation=++_connectionGeneration;
+  const oldConn=st.conn;st.conn=null;
+  const oldPeer=st.peer;st.peer=null;
+  try{oldConn?.close();}catch(e){}
+  try{if(oldPeer&&!oldPeer.destroyed)oldPeer.destroy();}catch(e){}
+
+  if(!roomId){showError('URLにルームIDがありません。\nライバーから受け取ったURLを開いてください。');return;}
+  _connectAttempts++;
+  showScreen('screen-connecting');
+  setConnText(_connectAttempts>1?`再接続しています... (${_connectAttempts}/${MAX_AUTO_CONNECT_ATTEMPTS})`:'ルームに接続中...');
+
+  // If the external PeerJS script failed to load, fail visibly instead of spinning forever.
+  if(typeof window.Peer!=='function'){
+    showError('接続ライブラリ（PeerJS）を読み込めませんでした。通信環境を確認してページを再読み込みしてください。');
+    _connectAttempts=0;
+    return;
+  }
+
+  let peer;
+  try{peer=new window.Peer({debug:0});}
+  catch(err){handleConnectionFailure('接続を開始できませんでした: '+(err?.message||err),generation);return;}
   st.peer=peer;
+
+  // Bound the signaling-server phase as well as the host connection phase.
+  _connectTimer=setTimeout(()=>{
+    if(generation===_connectionGeneration&&peer===st.peer)
+      handleConnectionFailure('接続サーバーから応答がありませんでした。',generation);
+  },16000);
+
   peer.on('open',()=>{
-    if(peer!==st.peer)return;
+    if(generation!==_connectionGeneration||peer!==st.peer)return;
+    clearConnectionTimer();
     setConnText('ホストに接続中...');
-    const conn=peer.connect(roomId,{reliable:true,serialization:'binary'});
+    let conn;
+    try{conn=peer.connect(roomId,{reliable:true,serialization:'binary'});}
+    catch(err){handleConnectionFailure('ホストへの接続を開始できませんでした: '+(err?.message||err),generation);return;}
     st.conn=conn;
-    conn.on('open',()=>{setConnText('接続完了！');showScreen('screen-name');_reconnecting=false;});
-    conn.on('data',onData);
+    let connOpened=false;
+    _connectTimer=setTimeout(()=>{
+      if(generation===_connectionGeneration&&conn===st.conn&&!connOpened)
+        handleConnectionFailure('ホストに接続できませんでした。ルームが開かれているか、共有URLが正しいか確認してください。',generation);
+    },12000);
+
+    conn.on('open',()=>{
+      if(generation!==_connectionGeneration||conn!==st.conn)return;
+      connOpened=true;clearConnectionTimer();_connectAttempts=0;
+      setConnText('接続完了！');showScreen('screen-name');
+    });
+    conn.on('data',data=>{
+      if(generation===_connectionGeneration&&conn===st.conn)onData(data);
+    });
     conn.on('close',()=>{
-      if(conn!==st.conn)return;
+      if(generation!==_connectionGeneration||conn!==st.conn)return;
+      clearConnectionTimer();
       const cur=getCurrentScreen();
       if(cur==='screen-results'||cur==='screen-history')return;
-      setConnText('ホストと再接続中...');
-      showScreen('screen-connecting');
-      if(!_reconnecting){_reconnecting=true;setTimeout(()=>connect(),3000);}
+      handleConnectionFailure('ホストとの接続が切れました。再接続しています...',generation);
     });
-    conn.on('error',e=>console.warn('conn error:',e));
-    setTimeout(()=>{if(conn===st.conn&&!conn.open)showError('ホストに接続できませんでした。\nルームが開かれているか確認してください。');},12000);
+    conn.on('error',e=>{
+      console.warn('conn error:',e);
+      if(generation===_connectionGeneration&&conn===st.conn&&!connOpened)
+        handleConnectionFailure('ホストへ接続できませんでした（'+(e?.type||'通信エラー')+'）。',generation);
+    });
+  });
+
+  peer.on('disconnected',()=>{
+    if(generation!==_connectionGeneration||peer!==st.peer)return;
+    handleConnectionFailure('接続サーバーとの通信が切れました。',generation);
   });
   peer.on('error',e=>{
-    if(peer!==st.peer)return;
-    if(['peer-unavailable','network','server-error','socket-error','socket-closed'].includes(e.type)){
-      setConnText('再接続中...');setTimeout(()=>connect(),3000);}
-    else showError('接続エラー: '+e.type);
+    if(generation!==_connectionGeneration||peer!==st.peer)return;
+    console.warn('PeerJS error:',e?.type,e?.message);
+    const type=String(e?.type||'');
+    if(['browser-incompatible','ssl-unavailable','invalid-id','invalid-key'].includes(type)){
+      clearConnectionTimer();
+      showError('接続エラー: '+type+'\nHTTPS対応ブラウザで開き、リスナー用URLを確認してください。');
+      try{if(st.peer===peer)st.peer=null;peer.destroy();}catch(err){}
+      _connectAttempts=0;
+      return;
+    }
+    handleConnectionFailure('接続に失敗しました（'+(type||'通信エラー')+'）。',generation);
   });
+}
+
+function handleConnectionFailure(message,generation){
+  if(generation!==_connectionGeneration)return;
+  clearConnectionTimer();
+  const conn=st.conn;st.conn=null;
+  const peer=st.peer;st.peer=null;
+  try{conn?.close();}catch(e){}
+  try{if(peer&&!peer.destroyed)peer.destroy();}catch(e){}
+
+  if(_connectAttempts<MAX_AUTO_CONNECT_ATTEMPTS){
+    showScreen('screen-connecting');
+    setConnText(`${message} 再試行中...`);
+    if(_reconnectTimer)clearTimeout(_reconnectTimer);
+    _reconnectTimer=setTimeout(()=>{
+      _reconnectTimer=null;
+      if(generation===_connectionGeneration)connect();
+    },2200);
+  }else{
+    _connectAttempts=0;
+    showError(`${message}\n\nルームが開いているか、URLが最新か確認してください。改善しない場合は通信環境を変えて再試行してください。`);
+  }
+}
+
+function retryConnection(){
+  const err=document.querySelector('.connection-error-screen');
+  if(err)err.remove();
+  _connectAttempts=0;
+  connect();
 }
 
 function getCurrentScreen(){
@@ -717,7 +850,7 @@ function onData(data){
       break;
     case 'error':
       showScreen('screen-name');
-      document.getElementById('nameError').innerHTML=`<div class="error-box">${data.message}</div>`;break;
+      document.getElementById('nameError').innerHTML=`<div class="error-box">${esc(data.message||'接続できませんでした')}</div>`;break;
     case 'spin_result': {
       if(st.ignoreSpins>0){st.ignoreSpins--;break;}
       st.requestPending=false;
@@ -904,7 +1037,7 @@ function hideOverlay(){
   // Reset descendant hit targets too: otherwise an invisible previous DL/Next button
   // can intercept a tap on the real Gacha button in mobile Safari.
   const dl=document.getElementById('dlBtn');if(dl){dl.className='dl-btn';dl.onclick=null;}
-  const next=document.getElementById('nextBtn');if(next)next.className='again-btn';
+  const next=document.getElementById('nextBtn');if(next){next.className='again-btn';next.disabled=true;}
   const toResults=document.getElementById('toResultsBtn');if(toResults)toResults.className='to-results-btn';
   const skip=document.getElementById('skipOverlayBtn');if(skip)skip.className='skip-overlay-btn';
   const skipAll=document.getElementById('skipAllBtn');if(skipAll)skipAll.className='skip-all-btn';
@@ -914,7 +1047,7 @@ function hideOverlay(){
 
 function resetOverlay(){
   document.getElementById('dlBtn').className='dl-btn';document.getElementById('dlBtn').onclick=null;
-  document.getElementById('nextBtn').className='again-btn';
+  document.getElementById('nextBtn').className='again-btn';document.getElementById('nextBtn').disabled=true;
   document.getElementById('toResultsBtn').className='to-results-btn';
   document.getElementById('skipOverlayBtn').className='skip-overlay-btn';
   document.getElementById('skipAllBtn').className='skip-all-btn';
@@ -1172,7 +1305,7 @@ function tryShowDl(){
     dlBtn.onclick=()=>dlBlob(st.dlUrl,st.dlName);
   }
   if(st.remainingSpins>0){
-    document.getElementById('nextBtn').className='again-btn ready';
+    document.getElementById('nextBtn').className='again-btn ready';document.getElementById('nextBtn').disabled=false;
     document.getElementById('skipOverlayBtn').className='skip-overlay-btn show';
     document.getElementById('skipAllBtn').className='skip-all-btn show';
   }else{
@@ -1187,11 +1320,18 @@ function dlBlob(url,name){
 }
 
 function nextSpin(){
-  if(st.spinning||st.remainingSpins<=0)return;
-  if(!st.conn?.open){alert('ホストと接続されていません。');return;}
+  // Use the same lock for the result button and the main gacha button. This also
+  // prevents rapid taps from dispatching duplicate spin_request messages.
+  if(st.spinning||st.requestPending||st.batchPending>0||st.remainingSpins<=0)return;
+  if(st.pendingHasFile&&!st.fileDone)return;
+  if(st.curPid!==null&&st.curPid!==undefined)return;
+  if(!st.conn?.open){alert('ホストと接続されていません。再接続してください。');return;}
+  const nextButton=document.getElementById('nextBtn');
+  if(nextButton)nextButton.disabled=true;
+  clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
   hideOverlay();resetOverlay();
-  st.animDone=false;st.fileDone=false;st.dlUrl=null;
-  st.chunks=[];st.binaryChunks=[];st.totalChunks=0;st.pendingHasFile=false;
+  st.animDone=false;st.fileDone=false;st.dlUrl=null;st.dlName=null;
+  st.chunks=[];st.binaryChunks=[];st.totalChunks=0;st.pendingHasFile=false;st.pendingFilePid=null;
   st.requestPending=true;st.dismissPendingReveal=false;st.spinning=true;
   setGachaBtn(false);
   clearTimeout(_spinTimeout);
@@ -1590,11 +1730,13 @@ function setConnText(t){document.getElementById('connText').textContent=t;}
 
 function showError(msg){
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
-  const err=document.createElement('div');err.className='screen';err.style.zIndex='20';
-  err.innerHTML=`<div class="logo" style="font-size:clamp(18px,5vw,24px);margin-bottom:20px;">接続エラー</div>
-    <div class="panel"><div class="error-box" style="white-space:pre-line">${msg}</div>
-    <button class="submit-btn" onclick="location.reload()">再接続する</button></div>`;
-  document.body.appendChild(err);
+  document.querySelectorAll('.connection-error-screen').forEach(s=>s.remove());
+  const err=document.createElement('div');err.className='screen connection-error-screen';err.style.zIndex='20';
+  const title=document.createElement('div');title.className='logo';title.style.cssText='font-size:clamp(18px,5vw,24px);margin-bottom:20px;';title.textContent='接続エラー';
+  const panel=document.createElement('div');panel.className='panel';
+  const detail=document.createElement('div');detail.className='error-box';detail.style.whiteSpace='pre-line';detail.textContent=String(msg||'接続に失敗しました。');
+  const button=document.createElement('button');button.className='submit-btn';button.textContent='再接続する';button.addEventListener('click',retryConnection);
+  panel.append(detail,button);err.append(title,panel);document.body.appendChild(err);
 }
 
 function submitName(){
