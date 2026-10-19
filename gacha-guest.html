@@ -103,6 +103,8 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--cyan);outline-o
 .results-header,.history-header{padding:20px 20px 12px;flex-shrink:0;}
 .results-title,.history-title{font-family:var(--display);font-size:clamp(22px,6vw,28px);margin-bottom:8px;}
 .history-sub{font-size:13px;color:var(--mute);}
+.history-sort-row{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap;color:var(--mute);font-size:12px;font-weight:700}
+.history-sort-row select{max-width:100%;min-width:180px;padding:8px 10px;background:#111522;color:#f4f6ff;border:1px solid #343b51;border-radius:9px;font:700 12px var(--font)}
 .results-stats{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
 .rstat{font-weight:900;font-size:12px;padding:3px 10px;border-radius:999px;}
 .results-list,.history-list{flex:1;overflow-y:auto;padding:0 20px;min-height:0;}
@@ -257,6 +259,10 @@ body{
 .community-gauge-track{height:7px;background:#242a3d;border-radius:99px;overflow:hidden;margin-top:9px}
 .community-gauge-fill{height:100%;width:0;background:linear-gradient(90deg,#55b8ff,#ff3d71,#ffc857);border-radius:99px;transition:width .35s ease}
 .community-gauge-message{font-size:11px;color:#8f98b3;margin-top:6px}
+.community-reward-wrap{margin-top:10px;display:none}
+.community-reward-btn{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,200,87,.4);background:linear-gradient(135deg,rgba(255,200,87,.18),rgba(255,61,113,.13));color:#ffe39a;font:900 12px var(--font);cursor:pointer}
+.community-reward-btn:disabled{opacity:.72;cursor:wait}
+.community-reward-note{font-size:10px;color:#9aa3bd;margin-top:5px}
 .last-one-tag{display:inline-block;padding:3px 7px;border-radius:6px;background:rgba(255,200,87,.13);color:#ffc857;border:1px solid rgba(255,200,87,.35);font-size:10px;font-weight:900;white-space:nowrap}
 
 
@@ -312,6 +318,10 @@ body{
 @keyframes legendaryFlash{0%{filter:brightness(2.2)}100%{filter:brightness(1)}}
 @media(prefers-reduced-motion:reduce){#overlay.cine-start *,#overlay.cine-reveal{animation-duration:.01ms!important;animation-iteration-count:1!important}}
 @media(min-width:768px){#overlay .cinematic-stage{max-width:900px;margin:0 auto}#overlay .cine-rarity{margin-top:min(34vh,270px)}}
+
+
+/* A hidden fixed overlay must never leave descendants able to intercept taps. */
+#overlay:not(.show),#overlay:not(.show) *{pointer-events:none!important;}
 
 </style>
 </head>
@@ -385,6 +395,7 @@ body{
         <div class="community-gauge-title"><span id="communityGaugeTitle">みんなで目標達成！</span><span class="community-gauge-count" id="communityGaugeCount">0 / 100</span></div>
         <div class="community-gauge-track"><div class="community-gauge-fill" id="communityGaugeFill"></div></div>
         <div class="community-gauge-message" id="communityGaugeMessage">みんなの抽選回数が合算されます</div>
+        <div class="community-reward-wrap" id="communityGaugeRewardWrap"><button class="community-reward-btn" id="communityGaugeRewardBtn" disabled>目標達成報酬を受信中...</button><div class="community-reward-note" id="communityGaugeRewardNote"></div></div>
       </div>
       <div class="gacha-machine-col">
         <div class="capsule"><i class="cap-top"></i><i class="cap-bot"></i><i class="cap-shine"></i></div>
@@ -428,7 +439,7 @@ body{
     <div class="history-header">
       <div class="history-title">過去の景品</div>
       <div class="history-sub">最近獲得した景品とテキスト特典の履歴</div>
-      
+      <div class="history-sort-row"><label for="historySortSelect">表示順</label><select id="historySortSelect" onchange="renderHistory()"><option value="recent">新しい順</option><option value="rarity">種類別（レアリティ）</option><option value="name">景品名順</option><option value="file">ファイル付き</option><option value="text">テキスト特典</option></select></div>
     </div>
     <div class="history-list" id="historyList"></div>
     <div class="history-footer">
@@ -575,13 +586,13 @@ const st={
   bonusEvery:null,bonusFree:null,pinRequired:false,
   spinning:false,animDone:false,fileDone:false,
   dlUrl:null,dlName:null,dlMime:'application/octet-stream',
-  chunks:[],binaryChunks:[],totalChunks:0,pendingHasFile:false,
+  chunks:[],binaryChunks:[],totalChunks:0,pendingHasFile:false,curTransferKind:'prize',curTransferMeta:null,gaugeRewardFile:null,gaugeRewardError:'',
   results:[],currentResultIdx:-1,
   fastMode:false,fastTotal:0,fastStartIdx:0,
   sessionId:null,sessionLabel:'',
   ignoreSpins:0,batchPending:0,batchId:0,curPid:null,
   binaryExpectedChunks:0,binaryExpectedSize:0,binaryReceivedBytes:0,binaryReceiveTimer:null,binaryTransferMode:false,
-  requestPending:false,dismissPendingReveal:false,pendingFilePid:null,batchExpectedFilePids:[],batchReceiveFailed:0,
+  requestPending:false,dismissPendingReveal:false,pendingFilePid:null,batchExpectedFilePids:[],batchReceiveFailed:0,returnToGachaAfterPoints:false,
   prizeCatalog:[],eventGauge:null,lastGaugeCompleted:false,features:{inventory:true,unique:true,lastOne:true,eventPresets:true,eventGauge:true}
 };
 
@@ -593,7 +604,7 @@ const RESULT_CACHE_KEY='gacha-guest-active-results-v1';
 function cacheResults(){
   try{
     const data={sessionId:st.sessionId,sessionLabel:st.sessionLabel,remainingSpins:st.remainingSpins,
-      results:st.results.map(r=>({pid:r.pid,ro:r.ro,sessBatch:r.sessBatch,rarity:r.rarity,prize:r.prize,historyKey:r.historyKey,lastOneAwarded:!!r.lastOneAwarded,
+      results:st.results.map(r=>({pid:r.pid,ro:r.ro,sessBatch:r.sessBatch,rarity:r.rarity,prize:r.prize,historyKey:r.historyKey,fileFailed:!!r.fileFailed,lastOneAwarded:!!r.lastOneAwarded,
         dlName:r.dlName,dlMime:r.dlMime,hasData:!!r.arrayBuffer}))};
     localStorage.setItem(RESULT_CACHE_KEY,JSON.stringify(data));
   }catch(e){console.warn('cacheResults failed:',e);}
@@ -604,7 +615,7 @@ function restoreCachedResults(){
     const data=JSON.parse(raw);if(!data?.results?.length)return false;
     st.sessionId=data.sessionId||st.sessionId;st.sessionLabel=data.sessionLabel||st.sessionLabel;
     st.remainingSpins=Number.isFinite(data.remainingSpins)?data.remainingSpins:st.remainingSpins;
-    st.results=data.results.map(r=>({...r,dlUrl:null,arrayBuffer:null,bonusAwarded:0}));
+    st.results=data.results.map(r=>({...r,dlUrl:null,arrayBuffer:null,bonusAwarded:0,fileFailed:!!r.fileFailed||!!r.prize?.hasFile&&!r.hasData}));
     // リロード時は通信中の状態を引き継がない。受信済みファイルは履歴から確認できる。
     st.batchPending=0;st.batchReceiveFailed=st.results.filter(r=>r.prize?.hasFile&&!r.arrayBuffer).length;
     return true;
@@ -687,7 +698,7 @@ function onData(data){
       st.sessionLabel=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
       // 再接続時の状態リセット
       st.spinning=false;st.animDone=false;st.fileDone=false;st.requestPending=false;st.dismissPendingReveal=false;st.pendingFilePid=null;st.batchExpectedFilePids=[];
-      st.fastMode=false;st.ignoreSpins=0;st.batchPending=0;st.batchReceiveFailed=0;
+      st.fastMode=false;st.ignoreSpins=0;st.batchPending=0;st.batchReceiveFailed=0;st.returnToGachaAfterPoints=false;
       clearTimeout(_spinTimeout);clearTimeout(_revealTimer);_revealTimer=null;
       clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
       st.binaryChunks=[];st.chunks=[];st.curPid=null;st.binaryExpectedChunks=0;st.binaryExpectedSize=0;st.binaryReceivedBytes=0;st.binaryTransferMode=false;
@@ -738,6 +749,7 @@ function onData(data){
     case 'batch_result':onBatchResult(data);break;
     case 'features_update':st.features={...st.features,...(data.features||{})};if(st.features.eventGauge===false){const ge=document.getElementById('communityGauge');if(ge)ge.style.display='none';}else if(st.eventGauge)updateCommunityGauge(st.eventGauge,false);break;
     case 'event_gauge':if(data.enabled===false||st.features.eventGauge===false){const ge=document.getElementById('communityGauge');if(ge)ge.style.display='none';break;}updateCommunityGauge(data.eventGauge||data,!!data.eventGauge?.announce);break;
+    case 'gauge_reward_error':st.gaugeRewardError=String(data.message||'報酬ファイルの受信に失敗しました');renderCommunityGaugeReward();break;
     case 'catalog_update':st.prizeCatalog=Array.isArray(data.prizeCatalog)?data.prizeCatalog:[];break;
     case 'spin_denied':
       st.requestPending=false;st.dismissPendingReveal=false;
@@ -756,6 +768,7 @@ function onData(data){
       st.binaryExpectedSize=Math.max(0,Number(data.totalSize)||0);
       st.binaryReceivedBytes=0;st.binaryTransferMode=data.transferMode==='binary';
       st.dlName=String(data.fileName||'prize');st.dlMime=String(data.mimeType||'application/octet-stream');
+      st.curTransferKind=String(data.transferKind||'prize');st.curTransferMeta=data.transferMeta&&typeof data.transferMeta==='object'?data.transferMeta:null;st.gaugeRewardError='';
       st.curPid=(data.pid===undefined||data.pid===null)?null:data.pid;
       if(st.batchPending>0){
         const qidx=st.batchExpectedFilePids.findIndex(pid=>String(pid)===String(st.curPid));
@@ -764,34 +777,61 @@ function onData(data){
       st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),45000);
       break;
     }
-    case 'file_chunk':
-      // 旧方式との互換用。各チャンクで待機タイマーを更新する。
+    case 'file_chunk': {
+      // Base64 JSON chunks are the preferred path; continue accepting legacy text chunks.
       if(st.curPid===null||st.curPid===undefined)break;
-      st.chunks[data.i]=data.d;
+      if(data.pid!==undefined&&data.pid!==null&&String(data.pid)!==String(st.curPid)){
+        finishStalledFile('チャンクの転送IDが一致しません');break;
+      }
+      const i=Number(data.i);
+      if(!Number.isInteger(i)||i<0||i>=st.binaryExpectedChunks||typeof data.d!=='string'){
+        finishStalledFile('チャンクの形式が正しくありません');break;
+      }
+      st.chunks[i]=data.d;
       clearTimeout(st.binaryReceiveTimer);
-      st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),45000);
+      st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),60000);
       break;
+    }
     case 'file_end': {
       if(st.curPid===null||st.curPid===undefined)break;
       if(data.pid!==undefined&&data.pid!==null&&String(data.pid)!==String(st.curPid)){
         finishStalledFile('ファイル転送IDが一致しません');break;
       }
       clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
+      if(data.totalChunks!==undefined&&Number(data.totalChunks)!==st.binaryExpectedChunks){
+        finishStalledFile('ファイルのチャンク数が一致しません');break;
+      }
+      if(data.totalSize!==undefined&&Number(data.totalSize)!==st.binaryExpectedSize){
+        finishStalledFile('ファイルサイズ情報が一致しません');break;
+      }
       const binaryMode=st.binaryTransferMode||st.binaryChunks.length>0;
       if(binaryMode){
         const chunkOk=st.binaryChunks.length===st.binaryExpectedChunks;
         const sizeOk=st.binaryReceivedBytes===st.binaryExpectedSize;
         if(chunkOk&&sizeOk)buildBinaryFile();
         else finishStalledFile('ファイルの一部が欠落しました');
-      }else buildFile();
+      }else{
+        const chunkOk=st.chunks.length===st.binaryExpectedChunks&&Array.from({length:st.binaryExpectedChunks},(_,i)=>typeof st.chunks[i]==='string').every(Boolean);
+        if(chunkOk)buildFile();else finishStalledFile('ファイルの一部が欠落しました');
+      }
       break;
     }
-    case 'spins_update':
-      st.remainingSpins=data.remainingSpins;
-      document.getElementById('spinsNum').textContent=st.remainingSpins;
-      if(!st.spinning)setGachaBtn(true);
-      if(st.remainingSpins<=0){const g=document.getElementById('gachaBtn'),f=document.getElementById('fastBtn');if(g){g.disabled=true;g.textContent='終了';}if(f){f.disabled=true;f.textContent='残り回数なし';}}
+    case 'spins_update': {
+      const previous=Math.max(0,Number(st.remainingSpins)||0);
+      const next=Math.max(0,Number(data.remainingSpins)||0);
+      st.remainingSpins=next;
+      const spinsNode=document.getElementById('spinsNum');if(spinsNode)spinsNode.textContent=String(next);
+      // If points were added while the results/history screen was open, switch back
+      // to the actual draw screen. Otherwise taps can land on old result-download UI.
+      if(next>previous&&!st.spinning&&['screen-results','screen-history'].includes(getCurrentScreen())){
+        st.returnToGachaAfterPoints=true;
+        if(st.batchPending===0){showScreen('screen-gacha');st.returnToGachaAfterPoints=false;}
+      }
+      setGachaBtn(true);
+      if(next<=0){const draw=document.getElementById('gachaBtn'),fast=document.getElementById('fastBtn');if(draw){draw.disabled=true;draw.textContent='終了';}if(fast){fast.disabled=true;fast.textContent='残り回数なし';}}
+      cacheResults();
       break;
+    }
     case 'pin_required':
       st.pinRequired=!!data.value;
       document.getElementById('pinWrap').style.display=st.pinRequired?'block':'none';
@@ -839,12 +879,15 @@ function spin(){
 function setGachaBtn(enabled){
   const btn=document.getElementById('gachaBtn');
   const fBtn=document.getElementById('fastBtn');
-  const recv=st.batchPending>0;
+  if(!btn)return;
+  const recv=st.batchPending>0||(st.pendingHasFile&&!st.fileDone);
+  const busy=st.spinning||st.requestPending||recv;
   const noSpins=Number(st.remainingSpins)<=0;
-  btn.disabled=!enabled||recv||noSpins;
-  if(fBtn)fBtn.disabled=!enabled||recv||noSpins;
+  const canDraw=!!enabled&&!busy&&!noSpins;
+  btn.disabled=!canDraw;
+  if(fBtn)fBtn.disabled=!canDraw;
   if(recv)btn.textContent='ファイル受信中...';
-  else if(!enabled)btn.textContent='引いています...';
+  else if(busy)btn.textContent='引いています...';
   else if(noSpins){btn.textContent='終了';if(fBtn)fBtn.textContent='残り回数なし';}
   else {btn.textContent='GACHA !';if(fBtn)fBtn.textContent='まとめて引く（アニメなし）';}
 }
@@ -858,12 +901,19 @@ function hideOverlay(){
   if(!o)return;
   clearTimeout(_revealTimer);_revealTimer=null;_revealSequence++;
   o.classList.remove('show','cine-start','cine-reveal','cine-rare','cine-legendary');
+  // Reset descendant hit targets too: otherwise an invisible previous DL/Next button
+  // can intercept a tap on the real Gacha button in mobile Safari.
+  const dl=document.getElementById('dlBtn');if(dl){dl.className='dl-btn';dl.onclick=null;}
+  const next=document.getElementById('nextBtn');if(next)next.className='again-btn';
+  const toResults=document.getElementById('toResultsBtn');if(toResults)toResults.className='to-results-btn';
+  const skip=document.getElementById('skipOverlayBtn');if(skip)skip.className='skip-overlay-btn';
+  const skipAll=document.getElementById('skipAllBtn');if(skipAll)skipAll.className='skip-all-btn';
   // Never leave inline values overriding #overlay's opacity/pointer-events rules.
   o.style.opacity='';o.style.pointerEvents='';o.style.display='';
 }
 
 function resetOverlay(){
-  document.getElementById('dlBtn').className='dl-btn';
+  document.getElementById('dlBtn').className='dl-btn';document.getElementById('dlBtn').onclick=null;
   document.getElementById('nextBtn').className='again-btn';
   document.getElementById('toResultsBtn').className='to-results-btn';
   document.getElementById('skipOverlayBtn').className='skip-overlay-btn';
@@ -951,7 +1001,7 @@ function sendFileReceipt(type,pid,extra={}){
 function clearReceiveBuffers(){
   st.binaryChunks=[];st.chunks=[];st.totalChunks=0;
   st.binaryExpectedChunks=0;st.binaryExpectedSize=0;st.binaryReceivedBytes=0;
-  st.binaryTransferMode=false;st.curPid=null;
+  st.binaryTransferMode=false;st.curPid=null;st.curTransferKind='prize';st.curTransferMeta=null;
 }
 
 function finishStalledFile(message='ファイル受信がタイムアウトしました'){
@@ -959,11 +1009,14 @@ function finishStalledFile(message='ファイル受信がタイムアウトし�
   if(st.curPid===null||st.curPid===undefined)return;
   const failedPid=st.curPid;
   const inBatch=st.batchPending>0&&st.results.some(r=>r.sessBatch===st.batchId&&String(r.pid)===String(failedPid));
+  const failedKind=st.curTransferKind||'prize';
   sendFileReceipt('file_nack',failedPid,{message:String(message||'ファイル受信に失敗しました')});
   clearReceiveBuffers();
+  if(failedKind==='gauge_reward'){st.gaugeRewardError=String(message||'目標達成報酬の受信に失敗しました');renderCommunityGaugeReward();return;}
   if(inBatch){
     st.batchPending=Math.max(0,st.batchPending-1);
     st.batchReceiveFailed++;
+    st.results.filter(r=>r.sessBatch===st.batchId&&String(r.pid)===String(failedPid)&&!r.arrayBuffer).forEach(r=>{r.fileFailed=true;});
     cacheResults();
     onFileProgress();
     if(st.batchPending>0)armPendingFileWatchdog();
@@ -977,6 +1030,9 @@ function finishStalledFile(message='ファイル受信がタイムアウトし�
   }else{
     st.pendingFilePid=null;
     st.fileDone=true;
+    const failedResult=st.results[st.currentResultIdx];
+    if(failedResult&&String(failedResult.pid)===String(failedPid))failedResult.fileFailed=true;
+    cacheResults();
     tryShowDl();
     console.warn('file receive failed:',failedPid,message);
   }
@@ -997,6 +1053,10 @@ function armPendingFileWatchdog(){
       }else{
         st.batchReceiveFailed++;st.batchPending=Math.max(0,st.batchPending-1);
         sendFileReceipt('file_nack',expectedPid,{message:'ホストからファイル転送が開始されませんでした'});
+        st.results.filter(r=>r.sessBatch===st.batchId&&String(r.pid)===String(expectedPid)&&!r.arrayBuffer).forEach(r=>{r.fileFailed=true;});
+      }
+      if(expectedPid===undefined){
+        st.results.filter(r=>r.sessBatch===st.batchId&&r.prize?.hasFile&&!r.arrayBuffer).forEach(r=>{r.fileFailed=true;});
       }
       cacheResults();onFileProgress();
       if(st.batchPending>0)armPendingFileWatchdog();
@@ -1006,7 +1066,10 @@ function armPendingFileWatchdog(){
     }
     if(st.pendingHasFile&&!st.fileDone){
       sendFileReceipt('file_nack',st.pendingFilePid,{message:'ホストからファイル転送が開始されませんでした'});
-      st.pendingFilePid=null;st.fileDone=true;tryShowDl();
+      const failedPid=st.pendingFilePid;
+      st.pendingFilePid=null;st.fileDone=true;
+      const failedResult=st.results[st.currentResultIdx];if(failedResult&&String(failedResult.pid)===String(failedPid??''))failedResult.fileFailed=true;
+      cacheResults();tryShowDl();
       console.warn('file transfer did not start before timeout');
     }
   },45000);
@@ -1021,13 +1084,13 @@ function commitReceivedFile(bytes,pid){
     const rs=st.results.filter(r=>String(r.pid)===String(pid)&&r.sessBatch===st.batchId&&!r.arrayBuffer);
     if(!rs.length){URL.revokeObjectURL(url);throw new Error('まとめ引きの当選結果が見つかりません');}
     const ab=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
-    rs.forEach(r=>{r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;});
+    rs.forEach(r=>{r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;r.fileFailed=false;});
     if(rs[0])savePrizeToHistory({...rs[0],count:rs.length},st.sessionId,st.sessionLabel,rs[0].historyKey).then(()=>{document.getElementById('histBtn').style.display='';}).catch(e=>console.warn('history save failed:',e));
   }else{
     const r=st.results[st.currentResultIdx];
     if(!r||String(r.pid)!==String(pid)){URL.revokeObjectURL(url);throw new Error('対応する抽選結果が見つかりません');}
     const ab=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
-    r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;st.dlUrl=url;
+    r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;r.fileFailed=false;st.dlUrl=url;
     savePrizeToHistory(r,st.sessionId,st.sessionLabel,r.historyKey).then(()=>{document.getElementById('histBtn').style.display='';}).catch(e=>console.warn('history save failed:',e));
   }
   cacheResults();
@@ -1037,6 +1100,18 @@ function commitReceivedFile(bytes,pid){
 function completeFileTransfer(bytes){
   if(st.curPid===null||st.curPid===undefined)throw new Error('転送IDがありません');
   const pid=st.curPid;
+  if(st.curTransferKind==='gauge_reward'){
+    clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
+    if(st.gaugeRewardFile?.url)URL.revokeObjectURL(st.gaugeRewardFile.url);
+    const arrayBuffer=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
+    const mimeType=st.dlMime||'application/octet-stream';
+    const url=URL.createObjectURL(new Blob([arrayBuffer],{type:mimeType}));
+    st.gaugeRewardFile={name:st.dlName||'goal-reward',mimeType,url,arrayBuffer,
+      completionId:Number(st.curTransferMeta?.completionId)||0,fileVersion:Number(st.curTransferMeta?.fileVersion)||0};
+    st.gaugeRewardError='';
+    sendFileReceipt('file_ack',pid,{size:bytes.byteLength});
+    clearReceiveBuffers();renderCommunityGaugeReward();return;
+  }
   let committed;
   try{committed=commitReceivedFile(bytes,pid);}
   catch(err){finishStalledFile(`ファイルの保存に失敗しました: ${err.message||err}`);return;}
@@ -1070,10 +1145,13 @@ function buildBinaryFile(){
 
 function buildFile(){
   try{
+    if(st.chunks.length!==st.binaryExpectedChunks||!Array.from({length:st.binaryExpectedChunks},(_,i)=>typeof st.chunks[i]==='string').every(Boolean)){
+      throw new Error('チャンクが不足しています');
+    }
     const bin=atob(st.chunks.join(''));
     const bytes=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-    if(st.binaryExpectedSize&&bytes.byteLength!==st.binaryExpectedSize)throw new Error('ファイルサイズが一致しません');
+    if(bytes.byteLength!==st.binaryExpectedSize)throw new Error('ファイルサイズが一致しません');
     completeFileTransfer(bytes);
   }catch(e){
     console.error('buildFile error:',e);
@@ -1237,6 +1315,11 @@ function onFileProgress(){
     if(!(st.batchPending>0))prepareZip();
   }
   setGachaBtn(true);
+  if(st.returnToGachaAfterPoints&&st.batchPending===0&&!st.spinning){
+    st.returnToGachaAfterPoints=false;
+    showScreen('screen-gacha');
+    setGachaBtn(true);
+  }
 }
 
 /* ===== RESULTS ===== */
@@ -1288,7 +1371,7 @@ function renderResults(){
       <div class="ri-actions">
         ${n>1?`<span class="ri-count">×${n}</span>`:''}
         ${r.dlUrl?`<button class="ri-dl" onclick="dlGroup(${i})">DL</button>`
-                 :r.prize.hasFile?`<span class="ri-wait">受信中</span>`:''}
+                 :r.prize.hasFile?(r.fileFailed?`<span class="ri-wait" style="color:#ff668e">受信失敗</span>`:`<span class="ri-wait">受信中</span>`):''}
         ${r.prize.text?`<button class="ri-copy" onclick="copyText(${i},this)">コピー</button>`:''}
       </div>
     </div>`).join('')+
@@ -1366,15 +1449,62 @@ async function showHistory(){
   showScreen('screen-history');
 }
 
+function renderHistoryItem(item){
+  return `<div class="history-item">
+    <span class="hi-badge" style="background:${esc(item.rarityColor||'#888888')};">${esc(item.rarityName||'景品')}</span>
+    <div class="hi-info">
+      <div class="hi-name">${esc(item.prizeName||'景品')}${Number(item.count)>1?' ×'+Number(item.count):''} ${item.lastOneAwarded?'<span class="last-one-tag">ラストワン賞</span>':''}</div>
+      ${item.prizeText?`<div class="hi-text">${esc(item.prizeText)}</div>`:''}
+    </div>
+    <div style="display:flex;gap:5px;flex-shrink:0;">
+      ${item.hasFile&&item.arrayBuffer?`<button class="hi-dl" onclick="dlFromHistory(${Number(item.id)})">DL</button>`:''}
+      ${item.prizeText?`<button class="hi-copy" onclick="copyHistText(${Number(item.id)})">コピー</button>`:''}
+    </div>
+  </div>`;
+}
+
+function historyRarityOrder(item){
+  const entry=st.prizeCatalog.find(p=>String(p.pid)===String(item.pid));
+  return Number.isFinite(Number(entry?.ro))?Number(entry.ro):999;
+}
+
 async function renderHistory(){
   const list=document.getElementById('historyList');
+  const sortMode=document.getElementById('historySortSelect')?.value||'recent';
   const all=await loadAllHistory().catch(()=>[]);
-  const statsItems=all.filter(item=>(!item.roomId||item.roomId===roomId)&&(!item.listenerName||!st.name||item.listenerName===st.name));
-  const historyItems=statsItems;
-  if(!historyItems.length){list.innerHTML='<div class="empty-history">保存された景品はありません。テキスト景品もここに自動保存されます。</div>';return;}
-
+  let historyItems=all.filter(item=>(!item.roomId||item.roomId===roomId)&&(!item.listenerName||!st.name||item.listenerName===st.name));
+  if(sortMode==='file')historyItems=historyItems.filter(item=>!!item.hasFile&&!!item.arrayBuffer);
+  if(sortMode==='text')historyItems=historyItems.filter(item=>!!item.prizeText);
+  if(!historyItems.length){
+    const msg=sortMode==='file'?'ファイル付きの景品履歴はありません。':sortMode==='text'?'テキスト特典の履歴はありません。':'保存された景品はありません。テキスト景品もここに自動保存されます。';
+    list.innerHTML=`<div class="empty-history">${msg}</div>`;return;
+  }
+  if(sortMode==='rarity'){
+    const groups=new Map();
+    historyItems.forEach(item=>{const key=item.rarityName||'その他';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item);});
+    const sortedGroups=[...groups.entries()].sort((a,b)=>{
+      const ai=a[1].slice().sort((x,y)=>historyRarityOrder(x)-historyRarityOrder(y))[0];
+      const bi=b[1].slice().sort((x,y)=>historyRarityOrder(x)-historyRarityOrder(y))[0];
+      return historyRarityOrder(ai)-historyRarityOrder(bi)||a[0].localeCompare(b[0],'ja');
+    });
+    list.innerHTML=sortedGroups.map(([rarity,items])=>{
+      items.sort((a,b)=>Number(b.timestamp||0)-Number(a.timestamp||0));
+      return `<div class="history-session"><div class="history-session-hdr"><span>${esc(rarity)} の景品</span><span>${items.reduce((n,i)=>n+(Number(i.count)||1),0)}回分</span></div>${items.map(renderHistoryItem).join('')}</div>`;
+    }).join('');
+    return;
+  }
+  if(sortMode==='name'){
+    historyItems.sort((a,b)=>(a.prizeName||'').localeCompare(b.prizeName||'','ja',{numeric:true})||Number(b.timestamp||0)-Number(a.timestamp||0));
+    list.innerHTML=`<div class="history-session"><div class="history-session-hdr"><span>景品名順</span><span>${historyItems.length}種類</span></div>${historyItems.map(renderHistoryItem).join('')}</div>`;
+    return;
+  }
+  historyItems.sort((a,b)=>Number(b.timestamp||0)-Number(a.timestamp||0));
+  if(sortMode==='file'||sortMode==='text'){
+    list.innerHTML=`<div class="history-session"><div class="history-session-hdr"><span>${sortMode==='file'?'ファイル付き':'テキスト特典'}</span><span>${historyItems.length}件</span></div>${historyItems.map(renderHistoryItem).join('')}</div>`;
+    return;
+  }
   const sessions={};
-  historyItems.sort((a,b)=>b.timestamp-a.timestamp).forEach(item=>{
+  historyItems.forEach(item=>{
     const sid=item.sessionId||'unknown';
     if(!sessions[sid])sessions[sid]={label:item.sessionLabel||'日時不明',items:[]};
     sessions[sid].items.push(item);
@@ -1382,18 +1512,7 @@ async function renderHistory(){
   list.innerHTML=Object.entries(sessions).map(([sid,sess])=>`
     <div class="history-session">
       <div class="history-session-hdr"><span>${esc(sess.label)}</span><span>${sess.items.reduce((n,i)=>n+(Number(i.count)||1),0)}回分</span></div>
-      ${sess.items.map(item=>`
-        <div class="history-item">
-          <span class="hi-badge" style="background:${esc(item.rarityColor||'#888888')};">${esc(item.rarityName||'景品')}</span>
-          <div class="hi-info">
-            <div class="hi-name">${esc(item.prizeName||'景品')}${item.count>1?' ×'+item.count:''} ${item.lastOneAwarded?'<span class="last-one-tag">ラストワン賞</span>':''}</div>
-            ${item.prizeText?`<div class="hi-text">${esc(item.prizeText)}</div>`:''}
-          </div>
-          <div style="display:flex;gap:5px;flex-shrink:0;">
-            ${item.hasFile&&item.arrayBuffer?`<button class="hi-dl" onclick="dlFromHistory(${item.id})">DL</button>`:''}
-            ${item.prizeText?`<button class="hi-copy" onclick="copyHistText(${item.id})">コピー</button>`:''}
-          </div>
-        </div>`).join('')}
+      ${sess.items.map(renderHistoryItem).join('')}
     </div>`).join('');
 }
 
@@ -1422,17 +1541,41 @@ async function clearHistory(){
   renderHistory();
 }
 
+function renderCommunityGaugeReward(){
+  const wrap=document.getElementById('communityGaugeRewardWrap');
+  const btn=document.getElementById('communityGaugeRewardBtn');
+  const note=document.getElementById('communityGaugeRewardNote');
+  if(!wrap||!btn||!note)return;
+  const g=st.eventGauge;
+  if(!g?.completed||!g.file?.name){wrap.style.display='none';return;}
+  wrap.style.display='block';
+  const currentFile=st.gaugeRewardFile&&Number(st.gaugeRewardFile.completionId)===Number(g.completionId||0)&&Number(st.gaugeRewardFile.fileVersion)===Number(g.file.updatedAt||0);
+  if(currentFile){
+    btn.disabled=false;btn.textContent=`報酬ファイルをダウンロード：${st.gaugeRewardFile.name}`;
+    btn.onclick=()=>dlBlob(st.gaugeRewardFile.url,st.gaugeRewardFile.name||'goal-reward');
+    note.textContent='目標達成報酬を受信しました。';
+  }else if(st.gaugeRewardError){
+    btn.disabled=false;btn.textContent='報酬ファイルを再受信';
+    btn.onclick=()=>{st.gaugeRewardError='';btn.disabled=true;btn.textContent='再受信を依頼中...';try{st.conn?.send({type:'gauge_reward_request'});}catch(e){st.gaugeRewardError='ホストへ再受信を依頼できませんでした';renderCommunityGaugeReward();}};
+    note.textContent=st.gaugeRewardError;
+  }else{
+    btn.disabled=true;btn.textContent='目標達成報酬を受信中...';btn.onclick=null;
+    note.textContent=`報酬ファイル：${g.file.name}`;
+  }
+}
+
 function updateCommunityGauge(gauge,announce=false){
   if(!gauge||typeof gauge!=='object')return;
   if(gauge.enabled===false||st.features?.eventGauge===false){const hiddenEl=document.getElementById('communityGauge');if(hiddenEl)hiddenEl.style.display='none';return;}
   const previous=!!st.eventGauge?.completed;
-  st.eventGauge={goal:Number(gauge.goal)||100,count:Number(gauge.count)||0,title:gauge.title||'みんなで目標達成！',message:gauge.message||'',completed:!!gauge.completed};
+  st.eventGauge={goal:Number(gauge.goal)||100,count:Number(gauge.count)||0,title:gauge.title||'みんなで目標達成！',message:gauge.message||'',completed:!!gauge.completed,completionId:Number(gauge.completionId)||0,file:gauge.file?.name?{name:String(gauge.file.name),mimeType:gauge.file.mimeType||'application/octet-stream',updatedAt:Number(gauge.file.updatedAt)||0}:null};
   const g=st.eventGauge,goal=Math.max(1,g.goal),count=Math.max(0,g.count),pct=Math.min(100,count/goal*100);
   const el=document.getElementById('communityGauge');if(!el)return;
   el.style.display='';document.getElementById('communityGaugeTitle').textContent=g.title;
   document.getElementById('communityGaugeCount').textContent=`${count} / ${goal}`;
   document.getElementById('communityGaugeFill').style.width=pct+'%';
   document.getElementById('communityGaugeMessage').textContent=g.completed?(g.message||'目標達成！参加ありがとう！'):`あと${Math.max(0,goal-count)}回で達成${g.message?' · '+g.message:''}`;
+  renderCommunityGaugeReward();
   if(announce&&!previous&&g.completed)showSpecialToast(g.message||'全員参加イベントの目標達成！');
 }
 function showSpecialToast(message){

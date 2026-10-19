@@ -233,6 +233,39 @@ label{color:#8f98b3}
 .toast{background:#fff;color:#10131d;box-shadow:0 8px 30px rgba(0,0,0,.3)}
 ::-webkit-scrollbar-thumb{background:#394157}
 
+
+/* ===== MOBILE NAV SAFE-AREA FIX ===== */
+@media(max-width:767px){
+  html,body{height:100%;min-height:100%;}
+  body{overflow:hidden;}
+  header{height:64px;min-height:64px;}
+  .app{
+    display:block;
+    height:calc(100dvh - 64px - 52px - env(safe-area-inset-bottom,0px));
+    max-height:calc(100dvh - 64px - 52px - env(safe-area-inset-bottom,0px));
+    min-height:0;overflow:hidden;
+  }
+  .sidebar,.main{
+    height:100%;min-height:0;max-height:100%;
+    padding-bottom:24px;
+    overscroll-behavior:contain;
+    -webkit-overflow-scrolling:touch;
+  }
+  .sidebar.mob-active,.main.mob-active{overflow-y:auto;}
+  .mob-nav{
+    display:block;position:fixed;left:0;right:0;bottom:0;
+    height:calc(52px + env(safe-area-inset-bottom,0px));
+    padding:0 0 env(safe-area-inset-bottom,0px);
+    box-sizing:border-box;z-index:500;
+    isolation:isolate;
+  }
+  .mob-nav-inner{height:52px;min-height:52px;display:flex;}
+  .mob-btn{
+    position:relative;z-index:1;min-width:0;min-height:52px;height:52px;
+    padding:10px 4px;touch-action:manipulation;pointer-events:auto;
+  }
+}
+
 </style>
 </head>
 <body>
@@ -358,6 +391,13 @@ label{color:#8f98b3}
           <div class="fg"><label>ゲージタイトル</label><input type="text" id="gaugeTitle" value="みんなで目標達成！" maxlength="80"></div>
         </div>
         <div class="fg"><label>達成メッセージ（任意）</label><input type="text" id="gaugeMessage" placeholder="目標達成ありがとう！" maxlength="160"></div>
+        <div class="fg" style="margin-top:10px;">
+          <label>目標達成報酬ファイル（任意）</label>
+          <div class="file-wrap"><input type="file" id="gaugeRewardInput" onchange="updateFileLabel(this,'gaugeRewardFileLabel')"><div class="file-display" id="gaugeRewardFileLabel">ファイルを選択（なくてもOK）</div></div>
+          <div class="flex gap-8 mt-8"><button class="btn btn-primary" style="flex:1;" onclick="saveGaugeRewardFile()">報酬ファイルを登録</button><button class="btn btn-ghost" style="flex:1;" onclick="removeGaugeRewardFile()">ファイルを外す</button></div>
+          <p id="gaugeRewardStatus" style="font-size:11px;color:var(--text-dim);margin-top:6px;">未登録。目標達成時に接続中のリスナーへ配布します。</p>
+          <p style="font-size:10px;color:var(--text-dim);margin-top:4px;">JPEG/PNG/WebP画像は位置情報（GPS）などのメタデータを除去して保存します。PDF・ZIP・動画などは中身を変更せず保存します。</p>
+        </div>
         <div style="margin:10px 0 4px;display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--text-dim);"><span id="hostGaugeTitle">みんなで目標達成！</span><strong id="hostGaugeCount">0 / 100</strong></div>
         <div style="height:9px;background:var(--border);border-radius:99px;overflow:hidden;"><div id="hostGaugeFill" style="height:100%;width:0;background:linear-gradient(90deg,#55b8ff,#ff3d71);transition:width .25s;"></div></div>
         <p id="hostGaugeStatus" style="font-size:11px;color:var(--text-dim);margin-top:6px;">目標達成で全ゲスト画面に通知します。</p>
@@ -425,7 +465,7 @@ const state={
   rarities:[],costPerSpin:100,bonusEvery:null,bonusFree:null,pinEnabled:false,
   uniquePerListener:false,lastOneEnabled:false,lastOneName:'ラストワン賞',lastOneText:'最後の在庫を引いた！',lastOneClaimed:false,
   features:{inventory:true,unique:true,lastOne:true,eventPresets:true,eventGauge:true},
-  eventGauge:{goal:100,count:0,title:'みんなで目標達成！',message:'',completed:false},
+  eventGauge:{goal:100,count:0,title:'みんなで目標達成！',message:'',completed:false,completionId:0,file:null},
   peer:null,roomId:null,connections:{},listeners:{},log:[],winCount:0
 };
 let _reconnectTimer=null;
@@ -560,6 +600,7 @@ function renderRarities(){
               <input type="file" id="pf-${r.id}" onchange="updateFileLabel(this,'pfl-${r.id}');previewSelectedFile(this,'pnew-${r.id}')">
               <div class="file-display" id="pfl-${r.id}">クリックして選択（なくてもOK）</div>
             </div>
+            <p style="font-size:10px;color:var(--text-dim);margin-top:5px;">JPEG/PNG/WebP画像はGPS位置情報などのメタデータを除去します。その他の形式は元データを保持します。</p>
             <div class="image-preview-box" id="pnew-${r.id}"><img alt="選択した画像のプレビュー" onclick="openImagePreview(this.src)"><div class="image-preview-caption">画像プレビュー（タップで拡大）</div></div>
           </div>
           <button class="btn btn-primary" style="width:100%;padding:8px;" onclick="addPrize(${r.id})">景品を追加</button>
@@ -576,8 +617,8 @@ async function loadRegisteredImagePreviews(){
       const img=document.getElementById('prize-thumb-'+p.id);
       if(!img)continue;
       try{
-        // stripExif はPNG以外をJPEGに再エンコードするため、実データに合わせる。
-        const mime=p.file.mimeType==='image/png'?'image/png':'image/jpeg';
+        // 保存したデータ形式に合わせてプレビューする（WebPはWebPのまま保持）。
+        const mime=p.file.mimeType||'application/octet-stream';
         const url=URL.createObjectURL(new Blob([p.file.arrayBuffer],{type:mime}));
         img.onload=()=>URL.revokeObjectURL(url);
         img.onerror=()=>{URL.revokeObjectURL(url);img.style.display='none';};
@@ -615,26 +656,62 @@ function updateFileLabel(input,labelId){
   else{el.textContent='クリックして選択（なくてもOK）';el.classList.remove('has-file');}
 }
 
+function stripWebPMetadata(arrayBuffer){
+  const src=new Uint8Array(arrayBuffer);
+  if(src.length<12||String.fromCharCode(...src.slice(0,4))!=='RIFF'||String.fromCharCode(...src.slice(8,12))!=='WEBP')throw new Error('WebP header invalid; refusing to save without metadata verification');
+  const readU32=(a,i)=>(a[i]|(a[i+1]<<8)|(a[i+2]<<16)|(a[i+3]<<24))>>>0;
+  const chunks=[];let offset=12;
+  while(offset+8<=src.length){
+    const type=String.fromCharCode(src[offset],src[offset+1],src[offset+2],src[offset+3]);
+    const size=readU32(src,offset+4),end=offset+8+size,padded=end+(size&1);
+    if(end>src.length||padded>src.length)throw new Error('WebP chunk length is invalid');
+    if(type!=='EXIF'&&type!=='XMP '){
+      const chunk=src.slice(offset,padded);
+      // VP8X feature bits: EXIF=0x08, XMP=0x04. Clear them after removing metadata chunks.
+      if(type==='VP8X'&&size>=1)chunk[8]&=~0x0C;
+      chunks.push(chunk);
+    }
+    offset=padded;
+  }
+  if(offset!==src.length)throw new Error('WebP chunk structure is incomplete');
+  const bodyLength=4+chunks.reduce((n,c)=>n+c.length,0);
+  const out=new Uint8Array(8+bodyLength);out.set([82,73,70,70],0);
+  new DataView(out.buffer).setUint32(4,out.length-8,true);out.set([87,69,66,80],8);
+  let target=12;for(const chunk of chunks){out.set(chunk,target);target+=chunk.length;}
+  return out.buffer;
+}
+
 async function stripExif(file){
-  // Canvas再エクスポートはJPEG/PNGに限定する。GIF/WebP/HEIC/SVG等は
-  // 形式・アニメーション・拡張子の不一致を防ぐため元データのまま保存する。
-  if(!['image/jpeg','image/png'].includes((file.type||'').toLowerCase()))return file.arrayBuffer();
+  // JPEG/PNGはCanvasで再エンコード、WebPはEXIF/XMPチャンクだけを除去します。
+  // GIF/HEIC/PDF/ZIP/動画等はアニメーションやファイル構造を壊さないため元のまま保持。
+  const fileType=(file.type||'').toLowerCase();
+  const name=String(file.name||'').toLowerCase();
+  const isPng=fileType==='image/png'||(!fileType&&name.endsWith('.png'));
+  const isJpeg=['image/jpeg','image/jpg'].includes(fileType)||(!fileType&&(name.endsWith('.jpg')||name.endsWith('.jpeg')));
+  const isWebP=fileType==='image/webp'||(!fileType&&name.endsWith('.webp'));
+  if(isWebP)return stripWebPMetadata(await file.arrayBuffer());
+  if(!isPng&&!isJpeg)return file.arrayBuffer();
   return new Promise((resolve,reject)=>{
     const url=URL.createObjectURL(file);
     const img=new Image();
+    let revoked=false;
+    const cleanup=()=>{if(!revoked){URL.revokeObjectURL(url);revoked=true;}};
     img.onload=()=>{
-      const c=document.createElement('canvas');
-      c.width=img.naturalWidth;c.height=img.naturalHeight;
-      c.getContext('2d').drawImage(img,0,0);
-      URL.revokeObjectURL(url);
-      // PNG以外はJPEGで出力（サイズ節約 & EXIF除去）
-      const mime=file.type==='image/png'?'image/png':'image/jpeg';
-      c.toBlob(b=>{
-        if(!b){reject(new Error('Canvas export failed'));return;}
-        b.arrayBuffer().then(resolve).catch(reject);
-      },mime,0.92);
+      try{
+        const c=document.createElement('canvas');
+        c.width=img.naturalWidth;c.height=img.naturalHeight;
+        const ctx=c.getContext('2d');
+        if(!ctx)throw new Error('Canvas context unavailable');
+        ctx.drawImage(img,0,0);
+        cleanup();
+        const mime=isPng?'image/png':'image/jpeg';
+        c.toBlob(b=>{
+          if(!b){reject(new Error('Canvas export failed'));return;}
+          b.arrayBuffer().then(resolve).catch(reject);
+        },mime,isPng?undefined:0.92);
+      }catch(err){cleanup();reject(err);}
     };
-    img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Image load failed'));};
+    img.onerror=()=>{cleanup();reject(new Error('Image load failed'));};
     img.src=url;
   });
 }
@@ -828,6 +905,7 @@ function handleConn(conn){
     else if(data.type==='spin_request')handleSpin(conn);
     else if(data.type==='batch_request')handleBatch(conn);
     else if(data.type==='file_ack'||data.type==='file_nack')handleFileTransferReceipt(conn,data);
+    else if(data.type==='gauge_reward_request'){const cd=state.connections[conn.peer];if(cd)sendGaugeRewardToConnection(cd);}
   });
   conn.on('close',()=>{
     const cd=state.connections[conn.peer];
@@ -853,6 +931,7 @@ function handleIdentify(conn,name,pin){
     bonusEvery:bonusActive?state.bonusEvery:null,bonusFree:bonusActive?state.bonusFree:null,
     prizeCatalog:getPrizeCatalog(),features:{...state.features},eventGauge:{...state.eventGauge,enabled:featureEnabled('eventGauge'),announce:false}});
   updateStats();renderListeners();
+  if(state.eventGauge.completed&&state.eventGauge.file)sendGaugeRewardToConnection(state.connections[conn.peer]);
 }
 
 function handleSpin(conn){
@@ -876,7 +955,7 @@ function handleSpin(conn){
     remainingSpins:l.remainingSpins,bonusAwarded,lastOneAwarded:result.lastOneAwarded,
     lastOneName:result.lastOneAwarded?state.lastOneName:null,lastOneText:result.lastOneAwarded?state.lastOneText:null
   });}catch(e){console.error('spin_result send failed:',e);return;}
-  if(result.prize.file&&result.prize.file.arrayBuffer){cd.sending=true;sendChunks(conn,result.prize.file.arrayBuffer,result.prize.file.name,result.prize.file.mimeType,result.prize.id,err=>{cd.sending=false;if(err)console.warn('single file transfer failed:',err);});}
+  if(result.prize.file&&result.prize.file.arrayBuffer){cd.sending=true;sendChunks(conn,result.prize.file.arrayBuffer,result.prize.file.name,result.prize.file.mimeType,result.prize.id,err=>{cd.sending=false;if(err)console.warn('single file transfer failed:',err);flushPendingGaugeReward(cd);});}
   addLog(cd.name,result);recordEventDraws(1);updateStats();renderListeners();saveState();
 }
 
@@ -937,8 +1016,8 @@ function handleBatch(conn){
   if(files.length)cd.sending=true;
   (function next(){
     const p=files.shift();
-    if(!p||!conn.open){cd.sending=false;return;}
-    sendChunks(conn,p.file.arrayBuffer,p.file.name,p.file.mimeType,p.id,next);
+    if(!p||!conn.open){cd.sending=false;flushPendingGaugeReward(cd);return;}
+    sendChunks(conn,p.file.arrayBuffer,p.file.name,p.file.mimeType,p.id,err=>{if(err)console.warn('batch prize file transfer failed:',err);next();});
   })();
 }
 
@@ -979,15 +1058,19 @@ function handleFileTransferReceipt(conn,data){
   }
 }
 
-function sendChunks(conn,ab,fileName,mimeType,pid,onDone){
-  const bytes=ab instanceof ArrayBuffer?new Uint8Array(ab):new Uint8Array(ab.buffer,ab.byteOffset,ab.byteLength);
-  const CHUNK_SIZE=32*1024;
-  const HIGH_WATER=512*1024;
+function sendChunks(conn,ab,fileName,mimeType,pid,onDone,transferKind='prize',transferMeta=null){
+  const bytes=ab instanceof ArrayBuffer
+    ?new Uint8Array(ab)
+    :new Uint8Array(ab.buffer,ab.byteOffset,ab.byteLength);
+  // Base64 JSON chunks avoid browser-dependent raw ArrayBuffer/Blob delivery
+  // and keep each PeerJS message well below typical data-channel limits.
+  const CHUNK_SIZE=24*1024;
+  const HIGH_WATER=384*1024;
   const total=Math.ceil(bytes.byteLength/CHUNK_SIZE);
   const cd=state.connections[conn.peer]||null;
   let idx=0,settled=false,pumpTimer=null;
   const transfer={pid:pid??null,size:bytes.byteLength,timer:null,finish:null};
-  const resetWatchdog=(ms=45000)=>{
+  const resetWatchdog=(ms=60000)=>{
     clearTimeout(transfer.timer);
     transfer.timer=setTimeout(()=>finish(new Error('file transfer timed out')),ms);
   };
@@ -995,7 +1078,8 @@ function sendChunks(conn,ab,fileName,mimeType,pid,onDone){
     if(settled)return;
     settled=true;clearTimeout(transfer.timer);clearTimeout(pumpTimer);
     if(cd?.transferWait===transfer)cd.transferWait=null;
-    try{if(typeof onDone==='function')onDone(err||null);}catch(cbErr){console.error('file transfer callback failed:',cbErr);}
+    try{if(typeof onDone==='function')onDone(err||null);}
+    catch(cbErr){console.error('file transfer callback failed:',cbErr);}
   };
   transfer.finish=finish;
   if(cd){
@@ -1006,7 +1090,14 @@ function sendChunks(conn,ab,fileName,mimeType,pid,onDone){
     }
     cd.transferWait=transfer;
   }
-
+  const toBase64=(u8)=>{
+    let binary='';
+    // Avoid argument limits on large typed arrays.
+    for(let i=0;i<u8.length;i+=0x6000){
+      binary+=String.fromCharCode(...u8.subarray(i,Math.min(i+0x6000,u8.length)));
+    }
+    return btoa(binary);
+  };
   const pump=()=>{
     if(settled)return;
     if(!conn.open){finish(new Error('connection closed'));return;}
@@ -1015,32 +1106,28 @@ function sendChunks(conn,ab,fileName,mimeType,pid,onDone){
       if(dc&&dc.readyState&&dc.readyState!=='open'){
         finish(new Error('data channel is not open'));return;
       }
-      // Never keep filling the WebRTC send queue when the receiver/network is slower.
-      if(dc&&Number(dc.bufferedAmount)>HIGH_WATER){
-        pumpTimer=setTimeout(pump,25);return;
-      }
+      if(dc&&Number(dc.bufferedAmount)>HIGH_WATER){pumpTimer=setTimeout(pump,25);return;}
       if(idx===0){
-        conn.send({type:'file_start',fileName,mimeType,totalChunks:total,totalSize:bytes.byteLength,pid:pid??null,transferMode:'binary'});
+        conn.send({type:'file_start',fileName,mimeType,totalChunks:total,totalSize:bytes.byteLength,pid:pid??null,transferMode:'base64',transferKind,transferMeta});
         resetWatchdog();
       }
       if(idx<total){
         const start=idx*CHUNK_SIZE,end=Math.min(start+CHUNK_SIZE,bytes.byteLength);
-        conn.send(bytes.buffer.slice(bytes.byteOffset+start,bytes.byteOffset+end));
+        const encoded=toBase64(bytes.subarray(start,end));
+        conn.send({type:'file_chunk',i:idx,d:encoded,pid:pid??null,transferMode:'base64',transferKind});
         idx++;
         resetWatchdog();
-        // Yield regularly so Safari can process inbound messages and update bufferedAmount.
         pumpTimer=setTimeout(pump,2);
         return;
       }
-      conn.send({type:'file_end',fileName,pid:pid??null,totalChunks:total,totalSize:bytes.byteLength});
-      // Keep this connection busy until the guest confirms it reassembled and stored the file.
-      resetWatchdog(60000);
+      conn.send({type:'file_end',fileName,pid:pid??null,totalChunks:total,totalSize:bytes.byteLength,transferMode:'base64',transferKind});
+      // Keep the connection locked until the receiver confirms reconstruction.
+      resetWatchdog(120000);
     }catch(err){
       console.error('sendChunks failed:',err);
       finish(err);
     }
   };
-  // Guard against a channel whose send buffer never drains, including before file_start.
   resetWatchdog();
   pump();
 }
@@ -1367,7 +1454,8 @@ async function loadState(){
     state.features={inventory:data.features?.inventory!==false,unique:data.features?.unique!==false,lastOne:data.features?.lastOne!==false,eventPresets:data.features?.eventPresets!==false,eventGauge:data.features?.eventGauge!==false};
     state.uniquePerListener=!!data.uniquePerListener;
     state.lastOneEnabled=!!data.lastOneEnabled;state.lastOneName=data.lastOneName||'ラストワン賞';state.lastOneText=data.lastOneText||'';state.lastOneClaimed=!!data.lastOneClaimed;
-    state.eventGauge={goal:Number(data.eventGauge?.goal)||100,count:Number(data.eventGauge?.count)||0,title:data.eventGauge?.title||'みんなで目標達成！',message:data.eventGauge?.message||'',completed:!!data.eventGauge?.completed};
+    state.eventGauge={goal:Number(data.eventGauge?.goal)||100,count:Number(data.eventGauge?.count)||0,title:data.eventGauge?.title||'みんなで目標達成！',message:data.eventGauge?.message||'',completed:!!data.eventGauge?.completed,completionId:Number(data.eventGauge?.completionId)||0,file:data.eventGauge?.file?.name?{id:'gauge-reward',name:data.eventGauge.file.name,mimeType:data.eventGauge.file.mimeType||'application/octet-stream',updatedAt:Number(data.eventGauge.file.updatedAt)||0}:null};
+    if(state.eventGauge.file){const storedGaugeFile=await dbLoadFile('gauge-reward').catch(()=>null);if(storedGaugeFile)state.eventGauge.file={...state.eventGauge.file,name:storedGaugeFile.name,mimeType:storedGaugeFile.mimeType||state.eventGauge.file.mimeType};else state.eventGauge.file=null;}
     state.log=Array.isArray(data.log)?data.log:[];state.winCount=Number(data.winCount)||state.log.length;
     document.getElementById('uniquePerListener').checked=state.uniquePerListener;
     document.getElementById('lastOneEnabled').checked=state.lastOneEnabled;
@@ -1435,13 +1523,18 @@ function dbDeleteEventPreset(id){
 function clearAllEventPresets(){
   return new Promise((res,rej)=>{const tx=_db.transaction(EVENT_STORE,'readwrite');tx.objectStore(EVENT_STORE).clear();tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error);});
 }
-function captureEventConfig(){
+async function captureEventConfig(){
+  const eventGauge={...state.eventGauge};
+  if(eventGauge.file?.id){
+    const stored=await dbLoadFile(eventGauge.file.id).catch(()=>null);
+    eventGauge.file=stored?{...eventGauge.file,name:stored.name,mimeType:stored.mimeType,arrayBuffer:stored.arrayBuffer?.slice(0)||null}:null;
+  }
   return {
     costPerSpin:parseInt(document.getElementById('costPerSpin').value)||100,
     bonusEvery:parseInt(document.getElementById('bonusEvery').value)||null,bonusFree:parseInt(document.getElementById('bonusFree').value)||null,
     pinEnabled:state.pinEnabled,uniquePerListener:state.uniquePerListener,lastOneEnabled:state.lastOneEnabled,
     lastOneName:state.lastOneName,lastOneText:state.lastOneText,lastOneClaimed:state.lastOneClaimed,
-    eventGauge:{...state.eventGauge},
+    eventGauge,
     rarities:state.rarities.map(r=>({id:r.id,name:r.name,color:r.color,rate:r.rate,prizes:r.prizes.map(p=>({id:p.id,name:p.name,text:p.text,stock:p.stock===undefined?null:p.stock,file:p.file?{name:p.file.name,mimeType:p.file.mimeType,arrayBuffer:p.file.arrayBuffer?.slice(0)||null}:null}))}))
   };
 }
@@ -1459,7 +1552,8 @@ async function saveEventPresetFromUI(){
   try{
     const presets=await dbGetAllEventPresets();const existing=presets.find(p=>p.name.toLocaleLowerCase()===name.toLocaleLowerCase());
     const id=existing?.id||('event-'+Date.now());
-    await dbPutEventPreset({id,name,updatedAt:Date.now(),data:captureEventConfig()});
+    const data=await captureEventConfig();
+    await dbPutEventPreset({id,name,updatedAt:Date.now(),data});
     document.getElementById('eventPresetName').value=name;await refreshEventPresetList(id);toast(`「${name}」を保存しました（景品ファイル含む）`);
   }catch(e){console.error('save event preset failed',e);alert('イベントの保存に失敗しました。空き容量を確認してください');}
 }
@@ -1476,7 +1570,11 @@ async function loadEventPresetFromUI(){
     state.uniquePerListener=!!d.uniquePerListener;state.lastOneEnabled=!!d.lastOneEnabled;state.lastOneName=d.lastOneName||'ラストワン賞';state.lastOneText=d.lastOneText||'';state.lastOneClaimed=!!d.lastOneClaimed;
     document.getElementById('uniquePerListener').checked=state.uniquePerListener;document.getElementById('lastOneEnabled').checked=state.lastOneEnabled;
     document.getElementById('lastOneName').value=state.lastOneName;document.getElementById('lastOneText').value=state.lastOneText;
-    state.eventGauge={goal:Number(d.eventGauge?.goal)||100,count:Number(d.eventGauge?.count)||0,title:d.eventGauge?.title||'みんなで目標達成！',message:d.eventGauge?.message||'',completed:!!d.eventGauge?.completed};
+    const presetGaugeFile=d.eventGauge?.file||null;
+    if(presetGaugeFile?.arrayBuffer&&presetGaugeFile.name)await dbSaveFile('gauge-reward',presetGaugeFile.arrayBuffer,presetGaugeFile.name,presetGaugeFile.mimeType||'application/octet-stream');
+    else await dbDeleteFile('gauge-reward').catch(()=>{});
+    const restoredGaugeFile=presetGaugeFile?.arrayBuffer&&presetGaugeFile.name?{id:'gauge-reward',name:presetGaugeFile.name,mimeType:presetGaugeFile.mimeType||'application/octet-stream',updatedAt:Number(presetGaugeFile.updatedAt)||Date.now()}:null;
+    state.eventGauge={goal:Number(d.eventGauge?.goal)||100,count:Number(d.eventGauge?.count)||0,title:d.eventGauge?.title||'みんなで目標達成！',message:d.eventGauge?.message||'',completed:!!d.eventGauge?.completed,completionId:Number(d.eventGauge?.completionId)||0,file:restoredGaugeFile};
     document.getElementById('gaugeGoal').value=state.eventGauge.goal;document.getElementById('gaugeTitle').value=state.eventGauge.title;document.getElementById('gaugeMessage').value=state.eventGauge.message;
     state.rarities=(d.rarities||[]).map(r=>({...r,prizes:(r.prizes||[]).map(p=>({...p,file:p.file?{name:p.file.name,mimeType:p.file.mimeType,arrayBuffer:p.file.arrayBuffer?.slice(0)||null}:null,stock:p.stock===undefined?null:p.stock}))}));
     // プリセットに保存されたファイル本体を通常の景品DBにも復元し、再読込後も消えないようにする。
@@ -1502,14 +1600,59 @@ function renderHostGauge(){
   titleEl.textContent=g.title||'全員参加型イベント';document.getElementById('hostGaugeCount').textContent=`${count} / ${goal}`;
   document.getElementById('hostGaugeFill').style.width=pct+'%';
   document.getElementById('hostGaugeStatus').textContent=g.completed?'目標達成済み！':`あと${Math.max(0,goal-count)}回で達成`;
+  const rewardStatus=document.getElementById('gaugeRewardStatus');
+  if(rewardStatus){
+    rewardStatus.textContent=g.file?.name
+      ?`登録済み：${g.file.name}${g.completed?'（目標達成済み。接続中のリスナーへ配布します）':'（目標達成時に配布）'}`
+      :'未登録。目標達成時に接続中のリスナーへ配布します。';
+  }
+  const rewardLabel=document.getElementById('gaugeRewardFileLabel');
+  if(rewardLabel&&!document.getElementById('gaugeRewardInput')?.files?.length){
+    rewardLabel.textContent=g.file?.name?`登録済み：${g.file.name}`:'ファイルを選択（なくてもOK）';
+    rewardLabel.classList.toggle('has-file',!!g.file?.name);
+  }
+}
+
+async function saveGaugeRewardFile(){
+  const input=document.getElementById('gaugeRewardInput');
+  const file=input?.files?.[0];
+  if(!file)return alert('登録する報酬ファイルを選択してください');
+  if(!_db)return alert('データベースの準備中です。少し待ってからお試しください');
+  const btn=document.querySelector('#eventGaugeCard button[onclick="saveGaugeRewardFile()"]');
+  if(btn){btn.disabled=true;btn.textContent='保存中...';}
+  try{
+    const mimeType=file.type||'application/octet-stream';
+    const arrayBuffer=await stripExif(file);
+    await dbSaveFile('gauge-reward',arrayBuffer,file.name,mimeType);
+    state.eventGauge.file={id:'gauge-reward',name:file.name,mimeType,updatedAt:Date.now()};
+    saveState();renderHostGauge();broadcastEventGauge(false);
+    input.value='';updateFileLabel(input,'gaugeRewardFileLabel');renderHostGauge();
+    toast('目標達成報酬ファイルを登録しました');
+  }catch(err){
+    console.error('save gauge reward failed:',err);
+    alert('報酬ファイルを保存できませんでした。ブラウザの空き容量とファイル形式を確認してください。');
+  }finally{if(btn){btn.disabled=false;btn.textContent='報酬ファイルを登録';}}
+}
+
+async function removeGaugeRewardFile(){
+  if(!state.eventGauge.file?.name)return toast('報酬ファイルは登録されていません');
+  if(!confirm('目標達成報酬ファイルを外しますか？'))return;
+  await dbDeleteFile('gauge-reward').catch(()=>{});
+  state.eventGauge.file=null;
+  saveState();renderHostGauge();broadcastEventGauge(false);
+  const input=document.getElementById('gaugeRewardInput');if(input)input.value='';
+  updateFileLabel(input,'gaugeRewardFileLabel');renderHostGauge();
+  toast('目標達成報酬ファイルを外しました');
 }
 function applyGaugeSettings(){
   const goal=Number(document.getElementById('gaugeGoal').value),title=document.getElementById('gaugeTitle').value.trim()||'みんなで目標達成！';
   if(!Number.isInteger(goal)||goal<1)return alert('目標回数は1以上の整数にしてください');
+  const wasCompleted=!!state.eventGauge.completed;
   state.eventGauge.goal=goal;state.eventGauge.title=title;state.eventGauge.message=document.getElementById('gaugeMessage').value.trim();
-  const wasCompleted=state.eventGauge.completed;state.eventGauge.completed=state.eventGauge.count>=goal;
-  if(wasCompleted&&!state.eventGauge.completed)state.eventGauge.completed=false;
-  renderHostGauge();saveState();broadcastEventGauge(false);toast('イベントゲージを更新しました');
+  state.eventGauge.completed=state.eventGauge.count>=goal;
+  const newlyCompleted=!wasCompleted&&state.eventGauge.completed;
+  if(newlyCompleted)state.eventGauge.completionId=(Number(state.eventGauge.completionId)||0)+1;
+  renderHostGauge();saveState();broadcastEventGauge(newlyCompleted);toast('イベントゲージを更新しました');
 }
 function resetEventGauge(){
   if(!confirm('共有ゲージの累計回数を0に戻しますか？'))return;
@@ -1519,12 +1662,59 @@ function broadcastEventGauge(announce=false){
   const enabled=featureEnabled('eventGauge');
   const payload={type:'event_gauge',enabled,eventGauge:{...state.eventGauge,announce:!!announce}};
   Object.values(state.connections).forEach(cd=>{try{if(cd.conn.open)cd.conn.send(payload);}catch(e){}});
+  if(enabled&&state.eventGauge.completed&&state.eventGauge.file)broadcastGaugeRewardToAll();
+}
+function broadcastGaugeRewardToAll(){
+  Object.values(state.connections).forEach(cd=>sendGaugeRewardToConnection(cd));
+}
+function gaugeRewardStamp(g=state.eventGauge){
+  return `${Number(g?.completionId)||0}:${Number(g?.file?.updatedAt)||0}:${g?.file?.name||''}`;
+}
+function sendGaugeRewardToConnection(cd){
+  const g=state.eventGauge;
+  if(!cd?.conn?.open||!featureEnabled('eventGauge')||!g?.completed||!g.file?.name)return;
+  const stamp=gaugeRewardStamp(g);
+  if(cd.gaugeRewardSentFor===stamp||cd.pendingGaugeRewardStamp===stamp)return;
+  if(cd.sending||cd.transferWait){cd.pendingGaugeReward=true;cd.pendingGaugeRewardStamp=stamp;return;}
+  cd.pendingGaugeReward=false;cd.pendingGaugeRewardStamp=null;
+  dbLoadFile(g.file.id||'gauge-reward').then(record=>{
+    if(!cd.conn.open)return;
+    if(!record?.arrayBuffer){
+      try{cd.conn.send({type:'gauge_reward_error',message:'ホスト側の報酬ファイルが見つかりません。管理画面で再登録してください。'});}catch(e){}
+      return;
+    }
+    if(!state.eventGauge.completed||!state.eventGauge.file)return;
+    const currentStamp=gaugeRewardStamp();
+    if(currentStamp!==stamp){sendGaugeRewardToConnection(cd);return;}
+    if(cd.sending||cd.transferWait){cd.pendingGaugeReward=true;cd.pendingGaugeRewardStamp=stamp;return;}
+    const completionId=Number(state.eventGauge.completionId)||0;
+    const fileVersion=Number(state.eventGauge.file.updatedAt)||0;
+    const transferId=`gauge-reward-${completionId}-${fileVersion}`;
+    cd.sending=true;
+    sendChunks(cd.conn,record.arrayBuffer,record.name||g.file.name,record.mimeType||g.file.mimeType||'application/octet-stream',transferId,err=>{
+      cd.sending=false;
+      if(err){
+        console.warn('community goal reward transfer failed:',err);
+        try{if(cd.conn.open)cd.conn.send({type:'gauge_reward_error',message:'目標達成報酬の受信に失敗しました。報酬ボタンから再試行してください。'});}catch(e){}
+      }else cd.gaugeRewardSentFor=stamp;
+      flushPendingGaugeReward(cd);
+    },'gauge_reward',{completionId,fileVersion});
+  }).catch(err=>{
+    console.warn('could not load community goal reward file:',err);
+    try{if(cd.conn.open)cd.conn.send({type:'gauge_reward_error',message:'目標達成報酬ファイルを読み込めませんでした。ホスト側でファイルを登録し直してください。'});}catch(e){}
+  });
+}
+function flushPendingGaugeReward(cd){
+  if(!cd?.pendingGaugeReward)return;
+  cd.pendingGaugeReward=false;cd.pendingGaugeRewardStamp=null;
+  sendGaugeRewardToConnection(cd);
 }
 function recordEventDraws(count){
   if(!featureEnabled('eventGauge')||!Number.isFinite(count)||count<=0)return;
   const g=state.eventGauge;const before=g.count;g.count+=count;
   const goal=Math.max(1,Number(g.goal)||100);const announce=!g.completed&&before<goal&&g.count>=goal;
   if(g.count>=goal)g.completed=true;
+  if(announce)g.completionId=(Number(g.completionId)||0)+1;
   renderHostGauge();broadcastEventGauge(announce);saveState();
 }
 
