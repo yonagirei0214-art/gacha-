@@ -580,8 +580,8 @@ const st={
   fastMode:false,fastTotal:0,fastStartIdx:0,
   sessionId:null,sessionLabel:'',
   ignoreSpins:0,batchPending:0,batchId:0,curPid:null,
-  binaryExpectedChunks:0,binaryExpectedSize:0,binaryReceivedBytes:0,binaryReceiveTimer:null,
-  batchReceiveFailed:0,
+  binaryExpectedChunks:0,binaryExpectedSize:0,binaryReceivedBytes:0,binaryReceiveTimer:null,binaryTransferMode:false,
+  requestPending:false,dismissPendingReveal:false,pendingFilePid:null,batchExpectedFilePids:[],batchReceiveFailed:0,
   prizeCatalog:[],eventGauge:null,lastGaugeCompleted:false,features:{inventory:true,unique:true,lastOne:true,eventPresets:true,eventGauge:true}
 };
 
@@ -665,12 +665,14 @@ function getCurrentScreen(){
 function onData(data){
   // binary serializationで届くファイル本体
   if(data instanceof ArrayBuffer || ArrayBuffer.isView(data)){
+    // Ignore late binary packets after a timeout/closed transfer; they must not poison the next file.
+    if(st.curPid===null||st.curPid===undefined)return;
     const u8=data instanceof ArrayBuffer?new Uint8Array(data):new Uint8Array(data.buffer,data.byteOffset,data.byteLength);
     st.binaryChunks.push(u8.slice());
     st.binaryReceivedBytes+=u8.byteLength;
     // 各チャンク受信でタイムアウトを延長。file_endが来ない場合も永久停止させない。
     clearTimeout(st.binaryReceiveTimer);
-    st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),25000);
+    st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),45000);
     return;
   }
   if(typeof data!=='object')return;
@@ -684,12 +686,12 @@ function onData(data){
       st.sessionId='sess-'+Date.now();
       st.sessionLabel=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
       // 再接続時の状態リセット
-      st.spinning=false;st.animDone=false;st.fileDone=false;
+      st.spinning=false;st.animDone=false;st.fileDone=false;st.requestPending=false;st.dismissPendingReveal=false;st.pendingFilePid=null;st.batchExpectedFilePids=[];
       st.fastMode=false;st.ignoreSpins=0;st.batchPending=0;st.batchReceiveFailed=0;
-      clearTimeout(_spinTimeout);
+      clearTimeout(_spinTimeout);clearTimeout(_revealTimer);_revealTimer=null;
       clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
-      st.binaryChunks=[];st.chunks=[];st.curPid=null;st.binaryExpectedChunks=0;st.binaryExpectedSize=0;st.binaryReceivedBytes=0;
-      document.getElementById('overlay').classList.remove('show');
+      st.binaryChunks=[];st.chunks=[];st.curPid=null;st.binaryExpectedChunks=0;st.binaryExpectedSize=0;st.binaryReceivedBytes=0;st.binaryTransferMode=false;
+      hideOverlay();
       document.getElementById('pinInput').value='';
       document.getElementById('playerName').textContent=data.name||st.name;
       document.getElementById('spinsNum').textContent=st.remainingSpins;
@@ -705,49 +707,85 @@ function onData(data){
     case 'error':
       showScreen('screen-name');
       document.getElementById('nameError').innerHTML=`<div class="error-box">${data.message}</div>`;break;
-    case 'spin_result':
+    case 'spin_result': {
       if(st.ignoreSpins>0){st.ignoreSpins--;break;}
-      st.pendingHasFile=data.prize.hasFile;
-      st.remainingSpins=data.remainingSpins;
+      st.requestPending=false;
+      const dismissReveal=st.dismissPendingReveal;
+      st.dismissPendingReveal=false;
+      st.pendingHasFile=!!data.prize?.hasFile;
+      st.pendingFilePid=st.pendingHasFile?(data.prize?.pid??null):null;
+      if(st.pendingHasFile)armPendingFileWatchdog();
+      st.remainingSpins=Number(data.remainingSpins)||0;
       document.getElementById('spinsNum').textContent=st.remainingSpins;
-      if(!data.prize.hasFile)st.fileDone=true;
-      const singleHistoryKey=`single-${Date.now()}-${data.prize.pid||'prize'}-${Math.random().toString(36).slice(2,7)}`;
-      st.results.push({pid:data.prize.pid,rarity:data.rarity,prize:data.prize,dlUrl:null,dlName:null,dlMime:null,arrayBuffer:null,bonusAwarded:data.bonusAwarded||0,
+      if(!st.pendingHasFile)st.fileDone=true;
+      const singleHistoryKey=`single-${Date.now()}-${data.prize?.pid??'prize'}-${Math.random().toString(36).slice(2,7)}`;
+      st.results.push({pid:data.prize?.pid,rarity:data.rarity||{name:'不明',color:'#888888'},prize:data.prize||{name:'景品',hasFile:false},dlUrl:null,dlName:null,dlMime:null,arrayBuffer:null,bonusAwarded:data.bonusAwarded||0,
         historyKey:singleHistoryKey,lastOneAwarded:!!data.lastOneAwarded,lastOneName:data.lastOneName||'ラストワン賞',lastOneText:data.lastOneText||''});
       st.currentResultIdx=st.results.length-1;
       savePrizeToHistory(st.results[st.currentResultIdx],st.sessionId,st.sessionLabel,singleHistoryKey).then(()=>{document.getElementById('histBtn').style.display='';});
       if(data.bonusAwarded>0)showBonusToast(data.bonusAwarded);
-      showCardResult(data.rarity,{...data.prize,lastOneAwarded:!!data.lastOneAwarded,lastOneName:data.lastOneName,lastOneText:data.lastOneText});
+      if(dismissReveal){
+        clearTimeout(_revealTimer);_revealTimer=null;
+        st.animDone=true;
+        hideOverlay();
+        tryShowDl();
+      }else{
+        showCardResult(data.rarity,{...data.prize,lastOneAwarded:!!data.lastOneAwarded,lastOneName:data.lastOneName,lastOneText:data.lastOneText});
+      }
       if(data.lastOneAwarded)showSpecialToast(`${data.lastOneName||'ラストワン賞'} 獲得！`);
       break;
+    }
     case 'batch_result':onBatchResult(data);break;
     case 'features_update':st.features={...st.features,...(data.features||{})};if(st.features.eventGauge===false){const ge=document.getElementById('communityGauge');if(ge)ge.style.display='none';}else if(st.eventGauge)updateCommunityGauge(st.eventGauge,false);break;
     case 'event_gauge':if(data.enabled===false||st.features.eventGauge===false){const ge=document.getElementById('communityGauge');if(ge)ge.style.display='none';break;}updateCommunityGauge(data.eventGauge||data,!!data.eventGauge?.announce);break;
     case 'catalog_update':st.prizeCatalog=Array.isArray(data.prizeCatalog)?data.prizeCatalog:[];break;
     case 'spin_denied':
-      if(st.fastMode){st.fastMode=false;st.spinning=false;clearTimeout(_spinTimeout);showScreen('screen-gacha');setGachaBtn(true);alert(data.message||'引けませんでした');}
+      st.requestPending=false;st.dismissPendingReveal=false;
+      if(st.fastMode){st.fastMode=false;st.spinning=false;clearTimeout(_spinTimeout);hideOverlay();showScreen('screen-gacha');setGachaBtn(true);alert(data.message||'引けませんでした');}
       else{forceCloseOverlay();alert(data.message||'残り回数がないか、エラーが発生しました。');}
       break;
-    case 'file_start':
+    case 'file_start': {
+      // A sender is allowed to have only one in-flight transfer per connection.
+      // If an old/incomplete transfer is still present, fail it rather than mixing chunks.
+      if(st.curPid!==null&&st.curPid!==undefined){
+        finishStalledFile('前のファイル転送が完了する前に次の転送が始まりました');
+      }
       clearTimeout(st.binaryReceiveTimer);
-      st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),25000);
-      st.chunks=[];st.binaryChunks=[];st.totalChunks=data.totalChunks||0;
-      st.binaryExpectedChunks=data.totalChunks||0;
-      st.binaryExpectedSize=data.totalSize||0;
-      st.binaryReceivedBytes=0;
-      st.dlName=data.fileName;st.dlMime=data.mimeType||'application/octet-stream';st.curPid=data.pid||null;break;
+      st.chunks=[];st.binaryChunks=[];st.totalChunks=Math.max(0,Number(data.totalChunks)||0);
+      st.binaryExpectedChunks=Math.max(0,Number(data.totalChunks)||0);
+      st.binaryExpectedSize=Math.max(0,Number(data.totalSize)||0);
+      st.binaryReceivedBytes=0;st.binaryTransferMode=data.transferMode==='binary';
+      st.dlName=String(data.fileName||'prize');st.dlMime=String(data.mimeType||'application/octet-stream');
+      st.curPid=(data.pid===undefined||data.pid===null)?null:data.pid;
+      if(st.batchPending>0){
+        const qidx=st.batchExpectedFilePids.findIndex(pid=>String(pid)===String(st.curPid));
+        if(qidx>=0)st.batchExpectedFilePids.splice(qidx,1);
+      }else if(String(st.pendingFilePid??'')===String(st.curPid??'')){st.pendingFilePid=null;}
+      st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),45000);
+      break;
+    }
     case 'file_chunk':
-      // 旧方式との互換用
-      st.chunks[data.i]=data.d;break;
-    case 'file_end':
+      // 旧方式との互換用。各チャンクで待機タイマーを更新する。
+      if(st.curPid===null||st.curPid===undefined)break;
+      st.chunks[data.i]=data.d;
+      clearTimeout(st.binaryReceiveTimer);
+      st.binaryReceiveTimer=setTimeout(()=>finishStalledFile(),45000);
+      break;
+    case 'file_end': {
+      if(st.curPid===null||st.curPid===undefined)break;
+      if(data.pid!==undefined&&data.pid!==null&&String(data.pid)!==String(st.curPid)){
+        finishStalledFile('ファイル転送IDが一致しません');break;
+      }
       clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
-      if(st.binaryChunks.length){
-        const chunkOk=!st.binaryExpectedChunks||st.binaryChunks.length===st.binaryExpectedChunks;
-        const sizeOk=!st.binaryExpectedSize||st.binaryReceivedBytes===st.binaryExpectedSize;
+      const binaryMode=st.binaryTransferMode||st.binaryChunks.length>0;
+      if(binaryMode){
+        const chunkOk=st.binaryChunks.length===st.binaryExpectedChunks;
+        const sizeOk=st.binaryReceivedBytes===st.binaryExpectedSize;
         if(chunkOk&&sizeOk)buildBinaryFile();
         else finishStalledFile('ファイルの一部が欠落しました');
       }else buildFile();
       break;
+    }
     case 'spins_update':
       st.remainingSpins=data.remainingSpins;
       document.getElementById('spinsNum').textContent=st.remainingSpins;
@@ -780,18 +818,19 @@ let _spinTimeout=null;
 function spin(){
   if(st.spinning||st.remainingSpins<=0)return;
   if(!st.conn?.open){alert('ホストと接続されていません。再接続してください。');return;}
-  st.spinning=true;st.animDone=false;st.fileDone=false;
-  st.dlUrl=null;st.chunks=[];st.totalChunks=0;st.pendingHasFile=false;
+  st.spinning=true;st.animDone=false;st.fileDone=false;st.requestPending=true;st.dismissPendingReveal=false;
+  clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;st.pendingFilePid=null;
+  st.dlUrl=null;st.chunks=[];st.binaryChunks=[];st.totalChunks=0;st.pendingHasFile=false;
   setGachaBtn(false);
   showOverlay();
   // Arm timeout before sending; some Safari/network failures throw synchronously from send().
   clearTimeout(_spinTimeout);
   _spinTimeout=setTimeout(()=>{
-    if(st.spinning&&!st.fastMode){forceCloseOverlay();alert('応答がありません。接続を確認して、もう一度お試しください。');}
-  },12000);
+    if(st.spinning&&!st.fastMode){st.requestPending=false;st.dismissPendingReveal=false;forceCloseOverlay();alert('応答がありません。接続状態を確認して、もう一度お試しください。');}
+  },18000);
   try{st.conn.send({type:'spin_request'});}
   catch(err){
-    clearTimeout(_spinTimeout);st.spinning=false;forceCloseOverlay();
+    clearTimeout(_spinTimeout);st.requestPending=false;st.dismissPendingReveal=false;st.spinning=false;forceCloseOverlay();
     console.error('spin_request send failed',err);
     alert('通信に失敗しました。接続し直してお試しください。');
   }
@@ -811,6 +850,18 @@ function setGachaBtn(enabled){
 }
 
 /* ===== OVERLAY ===== */
+let _revealTimer=null;
+let _revealSequence=0;
+
+function hideOverlay(){
+  const o=document.getElementById('overlay');
+  if(!o)return;
+  clearTimeout(_revealTimer);_revealTimer=null;_revealSequence++;
+  o.classList.remove('show','cine-start','cine-reveal','cine-rare','cine-legendary');
+  // Never leave inline values overriding #overlay's opacity/pointer-events rules.
+  o.style.opacity='';o.style.pointerEvents='';o.style.display='';
+}
+
 function resetOverlay(){
   document.getElementById('dlBtn').className='dl-btn';
   document.getElementById('nextBtn').className='again-btn';
@@ -819,17 +870,16 @@ function resetOverlay(){
   document.getElementById('skipAllBtn').className='skip-all-btn';
   const overlay=document.getElementById('overlay');
   overlay.classList.remove('cine-start','cine-reveal','cine-rare','cine-legendary');
+  overlay.style.opacity='';overlay.style.pointerEvents='';overlay.style.display='';
   overlay.style.setProperty('--reveal-color','#7b61ff');
   document.getElementById('cineRarity').textContent='';
   document.getElementById('cinePrizeName').textContent='';
   document.getElementById('cinePrizeText').textContent='';
   const rl=document.getElementById('resultLabel');rl.className='result-label';rl.textContent='';
-  // The cinematic layout replaced the old card markup. Keep legacy elements optional.
   const legacyCard=document.getElementById('cardInner');
   if(legacyCard)legacyCard.className='card-inner';
   const legacyPrizeText=document.getElementById('cardPrizeText');
   if(legacyPrizeText)legacyPrizeText.style.display='none';
-  // Always reset cinematic text opacity/animation state, including Safari after a previous reveal.
   ['cine-eyebrow','cine-rarity','cinePrizeName','cinePrizeText'].forEach(id=>{
     const el=document.getElementById(id);
     if(el){el.style.animation='none';void el.offsetWidth;el.style.animation='';}
@@ -840,14 +890,11 @@ function showOverlay(){
   if(!o)return;
   try{resetOverlay();}catch(err){console.error('overlay reset failed',err);}
   o.classList.add('show','cine-start');
-  // Force the reveal stage to be visible on iOS Safari even if an earlier animation was interrupted.
-  o.style.display='flex';
-  o.style.opacity='1';
-  o.style.pointerEvents='auto';
 }
-
 function showCardResult(rarity,prize){
-  clearTimeout(_spinTimeout);
+  clearTimeout(_spinTimeout);clearTimeout(_revealTimer);_revealTimer=null;
+  st.animDone=false;
+  const revealToken=++_revealSequence;
   const overlay=document.getElementById('overlay');
   if(!overlay)return;
   const color=/^#[0-9a-f]{6}$/i.test(rarity?.color||'')?rarity.color:'#8b75ff';
@@ -867,12 +914,13 @@ function showCardResult(rarity,prize){
   if(prizeName)prizeName.textContent=String(prize?.name||'獲得報酬');
   const details=[prize?.text,prize?.lastOneAwarded?prize?.lastOneText:null].filter(Boolean).join('\n\n');
   if(prizeText){prizeText.textContent=details;prizeText.style.display=details?'block':'none';}
+  overlay.style.opacity='';overlay.style.pointerEvents='';overlay.style.display='';
   overlay.classList.add('show');
-  overlay.style.display='flex';overlay.style.opacity='1';overlay.style.pointerEvents='auto';
 
   const revealDelay=legendary?1550:rare?1150:820;
-  setTimeout(()=>{
-    if(!overlay.classList.contains('show'))return;
+  _revealTimer=setTimeout(()=>{
+    _revealTimer=null;
+    if(revealToken!==_revealSequence||!overlay.classList.contains('show'))return;
     try{
       overlay.classList.remove('cine-start');
       overlay.classList.add('cine-reveal');
@@ -894,97 +942,152 @@ function showCardResult(rarity,prize){
     }
   },revealDelay);
 }
+function sendFileReceipt(type,pid,extra={}){
+  if(!st.conn?.open)return;
+  try{st.conn.send({type,pid,...extra});}
+  catch(err){console.warn('file receipt send failed:',err);}
+}
+
+function clearReceiveBuffers(){
+  st.binaryChunks=[];st.chunks=[];st.totalChunks=0;
+  st.binaryExpectedChunks=0;st.binaryExpectedSize=0;st.binaryReceivedBytes=0;
+  st.binaryTransferMode=false;st.curPid=null;
+}
+
 function finishStalledFile(message='ファイル受信がタイムアウトしました'){
   clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
-  if(!st.curPid)return;
+  if(st.curPid===null||st.curPid===undefined)return;
   const failedPid=st.curPid;
-  st.binaryChunks=[];st.chunks=[];
-  st.binaryExpectedChunks=0;st.binaryExpectedSize=0;st.binaryReceivedBytes=0;st.curPid=null;
-  if(st.batchPending>0){
+  const inBatch=st.batchPending>0&&st.results.some(r=>r.sessBatch===st.batchId&&String(r.pid)===String(failedPid));
+  sendFileReceipt('file_nack',failedPid,{message:String(message||'ファイル受信に失敗しました')});
+  clearReceiveBuffers();
+  if(inBatch){
     st.batchPending=Math.max(0,st.batchPending-1);
     st.batchReceiveFailed++;
+    cacheResults();
     onFileProgress();
-    if(getCurrentScreen()==='screen-results'){
-      const btn=document.getElementById('batchDlBtn');
+    if(st.batchPending>0)armPendingFileWatchdog();
+    const btn=document.getElementById('batchDlBtn');
+    if(btn&&getCurrentScreen()==='screen-results'){
       btn.textContent=`${st.batchReceiveFailed}件のファイルを受信できませんでした`;
       btn.disabled=false;
       btn.onclick=()=>prepareZip();
     }
-    cacheResults();
     console.warn('file receive failed:',failedPid,message);
   }else{
+    st.pendingFilePid=null;
     st.fileDone=true;
     tryShowDl();
+    console.warn('file receive failed:',failedPid,message);
   }
 }
 
+// Arm a watchdog even before file_start arrives. This prevents a missing start packet
+// from leaving the draw/results screen permanently locked. In a batch, table order
+// matches the host's sequential file queue.
+function armPendingFileWatchdog(){
+  clearTimeout(st.binaryReceiveTimer);
+  st.binaryReceiveTimer=setTimeout(()=>{
+    st.binaryReceiveTimer=null;
+    if(st.curPid!==null&&st.curPid!==undefined){finishStalledFile();return;}
+    if(st.batchPending>0){
+      const expectedPid=st.batchExpectedFilePids.shift();
+      if(expectedPid===undefined){
+        st.batchReceiveFailed+=st.batchPending;st.batchPending=0;
+      }else{
+        st.batchReceiveFailed++;st.batchPending=Math.max(0,st.batchPending-1);
+        sendFileReceipt('file_nack',expectedPid,{message:'ホストからファイル転送が開始されませんでした'});
+      }
+      cacheResults();onFileProgress();
+      if(st.batchPending>0)armPendingFileWatchdog();
+      const btn=document.getElementById('batchDlBtn');
+      if(btn&&st.batchPending===0&&st.batchReceiveFailed>0){btn.textContent=`${st.batchReceiveFailed}件のファイルを受信できませんでした`;btn.disabled=false;btn.onclick=()=>prepareZip();}
+      return;
+    }
+    if(st.pendingHasFile&&!st.fileDone){
+      sendFileReceipt('file_nack',st.pendingFilePid,{message:'ホストからファイル転送が開始されませんでした'});
+      st.pendingFilePid=null;st.fileDone=true;tryShowDl();
+      console.warn('file transfer did not start before timeout');
+    }
+  },45000);
+}
+
+// Associate a completed transfer with exactly the prize that requested it.
+// A mismatched/stale transfer is rejected rather than silently attached to another draw.
+function commitReceivedFile(bytes,pid){
+  const isBatch=st.batchPending>0&&st.results.some(r=>r.sessBatch===st.batchId&&String(r.pid)===String(pid));
+  const url=URL.createObjectURL(new Blob([bytes],{type:st.dlMime||'application/octet-stream'}));
+  if(isBatch){
+    const rs=st.results.filter(r=>String(r.pid)===String(pid)&&r.sessBatch===st.batchId&&!r.arrayBuffer);
+    if(!rs.length){URL.revokeObjectURL(url);throw new Error('まとめ引きの当選結果が見つかりません');}
+    const ab=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
+    rs.forEach(r=>{r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;});
+    if(rs[0])savePrizeToHistory({...rs[0],count:rs.length},st.sessionId,st.sessionLabel,rs[0].historyKey).then(()=>{document.getElementById('histBtn').style.display='';}).catch(e=>console.warn('history save failed:',e));
+  }else{
+    const r=st.results[st.currentResultIdx];
+    if(!r||String(r.pid)!==String(pid)){URL.revokeObjectURL(url);throw new Error('対応する抽選結果が見つかりません');}
+    const ab=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
+    r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;st.dlUrl=url;
+    savePrizeToHistory(r,st.sessionId,st.sessionLabel,r.historyKey).then(()=>{document.getElementById('histBtn').style.display='';}).catch(e=>console.warn('history save failed:',e));
+  }
+  cacheResults();
+  return {isBatch,url,size:bytes.byteLength};
+}
+
+function completeFileTransfer(bytes){
+  if(st.curPid===null||st.curPid===undefined)throw new Error('転送IDがありません');
+  const pid=st.curPid;
+  let committed;
+  try{committed=commitReceivedFile(bytes,pid);}
+  catch(err){finishStalledFile(`ファイルの保存に失敗しました: ${err.message||err}`);return;}
+  clearTimeout(st.binaryReceiveTimer);st.binaryReceiveTimer=null;
+  sendFileReceipt('file_ack',pid,{size:committed.size});
+  clearReceiveBuffers();
+  if(committed.isBatch){
+    st.batchPending=Math.max(0,st.batchPending-1);
+    onFileProgress();
+  }else{
+    st.pendingFilePid=null;
+    st.fileDone=true;
+    tryShowDl();
+  }
+  if(committed.isBatch&&st.batchPending>0)armPendingFileWatchdog();
+}
+
 function buildBinaryFile(){
-  const inBatch=st.batchPending>0&&!!st.curPid;
   try{
     const total=st.binaryChunks.reduce((n,c)=>n+c.byteLength,0);
     const bytes=new Uint8Array(total);
     let off=0;
     for(const chunk of st.binaryChunks){bytes.set(chunk,off);off+=chunk.byteLength;}
-    const ab=bytes.buffer.slice(0);
-    const url=URL.createObjectURL(new Blob([bytes],{type:st.dlMime}));
-    if(inBatch){
-      const rs=st.results.filter(r=>r.pid===st.curPid&&r.sessBatch===st.batchId&&!r.arrayBuffer);
-      rs.forEach(r=>{r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;});
-      if(rs[0])savePrizeToHistory({...rs[0],count:rs.length},st.sessionId,st.sessionLabel,rs[0].historyKey).then(()=>{document.getElementById('histBtn').style.display='';});
-      cacheResults();
-    }else{
-      st.dlUrl=url;
-      if(st.currentResultIdx>=0){
-        const r=st.results[st.currentResultIdx];
-        r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;
-        savePrizeToHistory(r,st.sessionId,st.sessionLabel,r.historyKey).then(()=>{document.getElementById('histBtn').style.display='';});
-      }
-      st.fileDone=true;tryShowDl();
-      cacheResults();
-    }
-  }catch(e){console.error('buildBinaryFile error:',e);}
-  finally{
-    if(inBatch){st.batchPending=Math.max(0,st.batchPending-1);onFileProgress();}
-    st.binaryChunks=[];st.chunks=[];st.binaryExpectedChunks=0;st.binaryExpectedSize=0;st.binaryReceivedBytes=0;st.curPid=null;
+    if(total!==st.binaryExpectedSize)throw new Error('ファイルサイズが一致しません');
+    completeFileTransfer(bytes);
+  }catch(e){
+    console.error('buildBinaryFile error:',e);
+    finishStalledFile(`ファイルの組み立てに失敗しました: ${e.message||e}`);
   }
 }
 
 function buildFile(){
-  const inBatch=st.batchPending>0&&!!st.curPid;
   try{
     const bin=atob(st.chunks.join(''));
     const bytes=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-    const ab=bytes.buffer.slice(0);
-    const url=URL.createObjectURL(new Blob([bytes],{type:st.dlMime}));
-    if(inBatch){
-      // まとめ引き：同じ景品の全結果にファイルを紐づけ、履歴は景品ごとに1件だけ保存
-      const rs=st.results.filter(r=>r.pid===st.curPid&&r.sessBatch===st.batchId&&!r.arrayBuffer);
-      rs.forEach(r=>{r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;});
-      if(rs[0])savePrizeToHistory({...rs[0],count:rs.length},st.sessionId,st.sessionLabel,rs[0].historyKey).then(()=>{document.getElementById('histBtn').style.display='';});
-      cacheResults();
-    }else{
-      st.dlUrl=url;
-      if(st.currentResultIdx>=0){
-        const r=st.results[st.currentResultIdx];
-        r.dlUrl=url;r.dlName=st.dlName;r.dlMime=st.dlMime;r.arrayBuffer=ab;
-        savePrizeToHistory(r,st.sessionId,st.sessionLabel,r.historyKey).then(()=>{document.getElementById('histBtn').style.display='';});
-      }
-      st.fileDone=true;tryShowDl();
-      cacheResults();
-    }
-  }catch(e){console.error('buildFile error:',e);}
-  finally{
-    if(inBatch){st.batchPending=Math.max(0,st.batchPending-1);st.chunks=[];onFileProgress();}
-    st.curPid=null;
+    if(st.binaryExpectedSize&&bytes.byteLength!==st.binaryExpectedSize)throw new Error('ファイルサイズが一致しません');
+    completeFileTransfer(bytes);
+  }catch(e){
+    console.error('buildFile error:',e);
+    finishStalledFile(`ファイルの組み立てに失敗しました: ${e.message||e}`);
   }
 }
 
 function tryShowDl(){
-  // オーバーレイが非表示なら何もしない（残留チャンクの誤作動防止）
-  if(!document.getElementById('overlay').classList.contains('show'))return;
-  if(!st.animDone||( st.pendingHasFile&&!st.fileDone))return;
+  if(!st.animDone||(st.pendingHasFile&&!st.fileDone))return;
   st.spinning=false;
+  const overlay=document.getElementById('overlay');
+  // The user may have closed the reveal while a file was in flight. Finish the state
+  // transition and unlock the next draw without reopening a dismissed overlay.
+  if(!overlay||!overlay.classList.contains('show')){setGachaBtn(true);return;}
   if(st.pendingHasFile&&st.dlUrl){
     const dlBtn=document.getElementById('dlBtn');
     dlBtn.className='dl-btn ready';
@@ -1006,31 +1109,44 @@ function dlBlob(url,name){
 }
 
 function nextSpin(){
-  if(!st.conn?.open)return;
-  resetOverlay();
+  if(st.spinning||st.remainingSpins<=0)return;
+  if(!st.conn?.open){alert('ホストと接続されていません。');return;}
+  hideOverlay();resetOverlay();
   st.animDone=false;st.fileDone=false;st.dlUrl=null;
-  st.chunks=[];st.totalChunks=0;st.pendingHasFile=false;st.spinning=true;
+  st.chunks=[];st.binaryChunks=[];st.totalChunks=0;st.pendingHasFile=false;
+  st.requestPending=true;st.dismissPendingReveal=false;st.spinning=true;
   setGachaBtn(false);
+  clearTimeout(_spinTimeout);
   _spinTimeout=setTimeout(()=>{
-    if(st.spinning&&!st.fastMode){forceCloseOverlay();alert('応答がありません。接続状態を確認してください。');}
-  },8000);
-  st.conn.send({type:'spin_request'});
+    if(st.spinning&&!st.fastMode){st.requestPending=false;st.dismissPendingReveal=false;forceCloseOverlay();alert('応答がありません。接続状態を確認してください。');}
+  },18000);
+  try{st.conn.send({type:'spin_request'});}
+  catch(err){
+    clearTimeout(_spinTimeout);st.requestPending=false;st.dismissPendingReveal=false;st.spinning=false;
+    forceCloseOverlay();console.error('spin_request send failed:',err);alert('通信に失敗しました。接続し直してください。');
+  }
 }
 
 function forceCloseOverlay(){
-  clearTimeout(_spinTimeout);st.fastMode=false;
-  document.getElementById('overlay').classList.remove('show');
-  // animDone/fileDone/pendingHasFile/dlUrl/chunks を全部リセット
-  // しないと残留ファイルチャンクが届いた時に tryShowDl が誤作動する
-  st.spinning=false;st.animDone=false;st.fileDone=false;
-  st.pendingHasFile=false;st.dlUrl=null;st.chunks=[];st.totalChunks=0;
-  resetOverlay();
-  setGachaBtn(true);
+  clearTimeout(_spinTimeout);_spinTimeout=null;
+  hideOverlay();
+  st.fastMode=false;
+  // A spin already sent to the host cannot be rolled back. Preserve it and quietly
+  // record its result if the user closes the reveal before the response arrives.
+  if(st.requestPending){
+    st.dismissPendingReveal=true;
+    setGachaBtn(false);
+    return;
+  }
+  // If a result/file is already in flight, retain its transfer state. It must finish
+  // (or time out) before another draw can begin, preventing file chunks from crossing.
+  st.animDone=true;
+  tryShowDl();
 }
 
 function skipAll(){
   clearTimeout(_spinTimeout);st.fastMode=false;st.spinning=false;
-  document.getElementById('overlay').classList.remove('show');
+  hideOverlay();
   showResults();
 }
 
@@ -1038,8 +1154,8 @@ function skipAll(){
 function startFastSpin(){
   if(st.spinning||st.remainingSpins<=0||st.batchPending>0)return;
   if(!st.conn?.open){alert('ホストと接続されていません。');return;}
-  st.fastMode=true;st.spinning=true;
-  document.getElementById('overlay').classList.remove('show');
+  st.fastMode=true;st.spinning=true;st.requestPending=false;st.dismissPendingReveal=false;
+  hideOverlay();
   document.getElementById('fastSub').textContent='結果を受け取っています';
   document.getElementById('fastCancel').style.display='none';
   showScreen('screen-spinning');
@@ -1096,9 +1212,11 @@ function onBatchResult(d){
     const item=grouped.get(r.historyKey);item.count++;item.lastOneAwarded=item.lastOneAwarded||r.lastOneAwarded;
   });
   grouped.forEach(item=>savePrizeToHistory(item,st.sessionId,st.sessionLabel,item.historyKey).then(()=>{document.getElementById('histBtn').style.display='';}));
-  st.batchPending=d.table.filter(t=>t.hasFile).length;
+  st.batchExpectedFilePids=d.table.filter(t=>t.hasFile).map(t=>t.pid);
+  st.batchPending=st.batchExpectedFilePids.length;
   st.batchReceiveFailed=0;
   cacheResults();
+  if(st.batchPending>0)armPendingFileWatchdog();
   if(d.lastOneSeq?.some(Boolean))showSpecialToast(`${d.lastOneName||'ラストワン賞'} 獲得！`);
   showResults();
   setGachaBtn(true);
@@ -1124,7 +1242,7 @@ function onFileProgress(){
 /* ===== RESULTS ===== */
 function showResults(){
   clearTimeout(_spinTimeout);st.fastMode=false;
-  document.getElementById('overlay').classList.remove('show');
+  hideOverlay();
   renderResults();
   showScreen('screen-results');
   if(!(st.batchPending>0))prepareZip();

@@ -616,9 +616,9 @@ function updateFileLabel(input,labelId){
 }
 
 async function stripExif(file){
-  // 画像ファイルのみCanvasで再エクスポートしてEXIF等のメタデータを消去
-  // PDF・ZIP等の非画像はそのまま返す
-  if(!file.type.startsWith('image/'))return file.arrayBuffer();
+  // Canvas再エクスポートはJPEG/PNGに限定する。GIF/WebP/HEIC/SVG等は
+  // 形式・アニメーション・拡張子の不一致を防ぐため元データのまま保存する。
+  if(!['image/jpeg','image/png'].includes((file.type||'').toLowerCase()))return file.arrayBuffer();
   return new Promise((resolve,reject)=>{
     const url=URL.createObjectURL(file);
     const img=new Image();
@@ -651,8 +651,9 @@ async function addPrize(rid){
   if(fi.files[0]){
     const fName=fi.files[0].name;
     const fMime=fi.files[0].type||'application/octet-stream';
-    const ab=await stripExif(fi.files[0]);
-    await dbSaveFile('f-'+prizeId,ab,fName,fMime).catch(e=>console.warn('dbSave failed:',e));
+    let ab;
+    try{ab=await stripExif(fi.files[0]);await dbSaveFile('f-'+prizeId,ab,fName,fMime);}
+    catch(e){console.error('dbSave failed:',e);return alert('景品ファイルを保存できませんでした。ブラウザの空き容量を確認し、ファイルサイズを小さくして再試行してください。');}
     file={name:fName,mimeType:fMime,arrayBuffer:ab};
   }
   r.prizes.push({id:prizeId,name,text,file,stock:null});
@@ -826,9 +827,11 @@ function handleConn(conn){
     if(data.type==='identify')handleIdentify(conn,data.name,data.pin);
     else if(data.type==='spin_request')handleSpin(conn);
     else if(data.type==='batch_request')handleBatch(conn);
+    else if(data.type==='file_ack'||data.type==='file_nack')handleFileTransferReceipt(conn,data);
   });
   conn.on('close',()=>{
     const cd=state.connections[conn.peer];
+    if(cd?.transferWait)cd.transferWait.finish(new Error('connection closed'));
     if(cd&&state.listeners[cd.name])state.listeners[cd.name].peerId=null;
     delete state.connections[conn.peer];
     updateStats();renderListeners();
@@ -866,14 +869,14 @@ function handleSpin(conn){
   const bFree=parseInt(document.getElementById('bonusFree').value)||null;
   if(bEvery>0&&bFree>0&&bFree<bEvery&&l.spinsUsed%bEvery===0){bonusAwarded=bFree;l.remainingSpins+=bonusAwarded;}
   saveListenerBalances();
-  conn.send({
+  try{conn.send({
     type:'spin_result',rarity:{name:result.rarity.name,color:result.rarity.color},
     prize:{pid:result.prize.id,name:result.prize.name,text:result.prize.text,hasFile:!!(result.prize.file&&result.prize.file.arrayBuffer),
       fileName:result.prize.file?.name||null,mimeType:result.prize.file?.mimeType||null},
     remainingSpins:l.remainingSpins,bonusAwarded,lastOneAwarded:result.lastOneAwarded,
     lastOneName:result.lastOneAwarded?state.lastOneName:null,lastOneText:result.lastOneAwarded?state.lastOneText:null
-  });
-  if(result.prize.file&&result.prize.file.arrayBuffer){cd.sending=true;sendChunks(conn,result.prize.file.arrayBuffer,result.prize.file.name,result.prize.file.mimeType,result.prize.id,()=>{cd.sending=false;});}
+  });}catch(e){console.error('spin_result send failed:',e);return;}
+  if(result.prize.file&&result.prize.file.arrayBuffer){cd.sending=true;sendChunks(conn,result.prize.file.arrayBuffer,result.prize.file.name,result.prize.file.mimeType,result.prize.id,err=>{cd.sending=false;if(err)console.warn('single file transfer failed:',err);});}
   addLog(cd.name,result);recordEventDraws(1);updateStats();renderListeners();saveState();
 }
 
@@ -960,30 +963,86 @@ function rollGacha(listener){
 }
 
 /* ===== FILE TRANSFER ===== */
-function sendChunks(conn,ab,fileName,mimeType,pid,onDone){
-  // iPhone/Safariでの安定性を優先して、64KBずつ・イベントループを
-  // 定期的に返しながら送信する。以前の256KB + microtask連打は、
-  // 大量ファイル時に受信側UI/受信イベントを詰まらせることがあった。
-  const bytes=new Uint8Array(ab);
-  const CS=64*1024;
-  const total=Math.ceil(bytes.byteLength/CS);
-  conn.send({type:'file_start',fileName,mimeType,totalChunks:total,totalSize:bytes.byteLength,pid:pid||null,transferMode:'binary'});
-  let idx=0;
-  const next=()=>{
-    if(!conn.open){if(onDone)onDone(new Error('connection closed'));return;}
-    if(idx>=total){
-      conn.send({type:'file_end',fileName,pid:pid||null,totalChunks:total,totalSize:bytes.byteLength});
-      if(onDone)onDone();
+function handleFileTransferReceipt(conn,data){
+  const cd=state.connections[conn.peer];
+  const transfer=cd?.transferWait;
+  if(!transfer)return;
+  if(String(data.pid??'')!==String(transfer.pid??''))return;
+  if(data.type==='file_ack'){
+    if(Number.isFinite(Number(data.size))&&Number(data.size)!==transfer.size){
+      transfer.finish(new Error('received file size did not match'));
       return;
     }
-    const start=idx*CS,end=Math.min(start+CS,bytes.byteLength);
-    conn.send(bytes.buffer.slice(start,end));
-    idx++;
-    // 送信バッファを抑え、必ず一定間隔でブラウザに処理時間を返す。
-    const buffered=conn.dataChannel?.bufferedAmount||0;
-    setTimeout(next, buffered>1024*1024 ? 12 : 2);
+    transfer.finish(null);
+  }else{
+    transfer.finish(new Error(data.message||'guest rejected the file transfer'));
+  }
+}
+
+function sendChunks(conn,ab,fileName,mimeType,pid,onDone){
+  const bytes=ab instanceof ArrayBuffer?new Uint8Array(ab):new Uint8Array(ab.buffer,ab.byteOffset,ab.byteLength);
+  const CHUNK_SIZE=32*1024;
+  const HIGH_WATER=512*1024;
+  const total=Math.ceil(bytes.byteLength/CHUNK_SIZE);
+  const cd=state.connections[conn.peer]||null;
+  let idx=0,settled=false,pumpTimer=null;
+  const transfer={pid:pid??null,size:bytes.byteLength,timer:null,finish:null};
+  const resetWatchdog=(ms=45000)=>{
+    clearTimeout(transfer.timer);
+    transfer.timer=setTimeout(()=>finish(new Error('file transfer timed out')),ms);
   };
-  next();
+  const finish=(err=null)=>{
+    if(settled)return;
+    settled=true;clearTimeout(transfer.timer);clearTimeout(pumpTimer);
+    if(cd?.transferWait===transfer)cd.transferWait=null;
+    try{if(typeof onDone==='function')onDone(err||null);}catch(cbErr){console.error('file transfer callback failed:',cbErr);}
+  };
+  transfer.finish=finish;
+  if(cd){
+    if(cd.transferWait){
+      console.warn('A file transfer was already active for this connection');
+      if(typeof onDone==='function')onDone(new Error('another file transfer is active'));
+      return;
+    }
+    cd.transferWait=transfer;
+  }
+
+  const pump=()=>{
+    if(settled)return;
+    if(!conn.open){finish(new Error('connection closed'));return;}
+    try{
+      const dc=conn.dataChannel;
+      if(dc&&dc.readyState&&dc.readyState!=='open'){
+        finish(new Error('data channel is not open'));return;
+      }
+      // Never keep filling the WebRTC send queue when the receiver/network is slower.
+      if(dc&&Number(dc.bufferedAmount)>HIGH_WATER){
+        pumpTimer=setTimeout(pump,25);return;
+      }
+      if(idx===0){
+        conn.send({type:'file_start',fileName,mimeType,totalChunks:total,totalSize:bytes.byteLength,pid:pid??null,transferMode:'binary'});
+        resetWatchdog();
+      }
+      if(idx<total){
+        const start=idx*CHUNK_SIZE,end=Math.min(start+CHUNK_SIZE,bytes.byteLength);
+        conn.send(bytes.buffer.slice(bytes.byteOffset+start,bytes.byteOffset+end));
+        idx++;
+        resetWatchdog();
+        // Yield regularly so Safari can process inbound messages and update bufferedAmount.
+        pumpTimer=setTimeout(pump,2);
+        return;
+      }
+      conn.send({type:'file_end',fileName,pid:pid??null,totalChunks:total,totalSize:bytes.byteLength});
+      // Keep this connection busy until the guest confirms it reassembled and stored the file.
+      resetWatchdog(60000);
+    }catch(err){
+      console.error('sendChunks failed:',err);
+      finish(err);
+    }
+  };
+  // Guard against a channel whose send buffer never drains, including before file_start.
+  resetWatchdog();
+  pump();
 }
 
 /* ===== LISTENERS ===== */
