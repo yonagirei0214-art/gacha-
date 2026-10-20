@@ -800,6 +800,43 @@ function resetRoomId(){
 
 // ===== TURN（中継）設定：IPを隠すため通信を必ずTURN経由にする =====
 const TURN_URL='https://still-math-2428.yonagirei0214.workers.dev/'; // ← あなたのWorkerのURLに書き換える
+
+// ===== 接続確認表示：実際に中継(relay)で通信しているかを画面に出す =====
+let _relayBad=false;
+function showRelayBadge(text,ok){
+  let el=document.getElementById('relayBadge');
+  if(!el){
+    el=document.createElement('div');el.id='relayBadge';
+    el.style.cssText='position:fixed;left:8px;bottom:8px;z-index:99999;padding:6px 10px;border-radius:8px;font:12px/1.4 sans-serif;color:#fff;max-width:80vw;opacity:.92';
+    el.onclick=()=>{if(!_relayBad)el.remove();};
+    document.body.appendChild(el);
+  }
+  el.style.background=ok?'#1b8a4b':'#c62828';
+  el.textContent=text;
+}
+async function checkRelay(conn){
+  try{
+    await new Promise(r=>setTimeout(r,1500));
+    const pc=conn&&conn.peerConnection;
+    if(!pc||!pc.getStats)return;
+    const stats=await pc.getStats();
+    const cands={};let pair=null,sel=null;
+    stats.forEach(s=>{
+      if(s.type==='local-candidate'||s.type==='remote-candidate')cands[s.id]=s;
+      if(s.type==='transport'&&s.selectedCandidatePairId)sel=s.selectedCandidatePairId;
+    });
+    stats.forEach(s=>{
+      if(s.type!=='candidate-pair')return;
+      if(sel?s.id===sel:(s.nominated&&s.state==='succeeded'))pair=s;
+    });
+    if(!pair){showRelayBadge('接続経路を確認できませんでした',false);return;}
+    const lt=cands[pair.localCandidateId]?.candidateType||'?';
+    const rt=cands[pair.remoteCandidateId]?.candidateType||'?';
+    const ok=lt==='relay'&&rt!=='host'&&rt!=='srflx';
+    if(!ok)_relayBad=true;
+    showRelayBadge(ok?(_relayBad?'⚠ 以前に直接接続あり':'🔒 中継(relay)で接続中'):'⚠ 直接接続の可能性（自分:'+lt+' / 相手:'+rt+'）',ok&&!_relayBad);
+  }catch(e){console.warn('relay check failed',e);}
+}
 let _iceCache=null;
 async function getIceConfig(){
   if(_iceCache&&Date.now()<_iceCache.exp)return _iceCache.cfg;
@@ -931,6 +968,7 @@ function copyPin(name){
 /* ===== CONNECTIONS ===== */
 function handleConn(conn){
   conn.on('open',()=>{
+    checkRelay(conn);
     conn.send({type:'pin_required',value:state.pinEnabled});
   });
   conn.on('data',data=>{
