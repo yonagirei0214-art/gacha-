@@ -785,6 +785,7 @@ function createRoom(){
 function resetRoomId(){
   if(!confirm('ルームIDを変更しますか？\n変更すると既存のゲストURLは使えなくなります。'))return;
   localStorage.removeItem(ROOM_ID_KEY);
+  _peerGen++;
   clearTimeout(_reconnectTimer);
   if(state.peer){state.peer.destroy();state.peer=null;}
   state.connections={};state.roomId=null;_roomCreated=false;
@@ -796,9 +797,41 @@ function resetRoomId(){
   toast('新しいIDで作成できます');
 }
 
-function initPeer(roomId){
+
+// ===== TURN（中継）設定：IPを隠すため通信を必ずTURN経由にする =====
+const TURN_URL='https://still-math-2428.yonagirei0214.workers.dev/'; // ← あなたのWorkerのURLに書き換える
+let _iceCache=null;
+async function getIceConfig(){
+  if(_iceCache&&Date.now()<_iceCache.exp)return _iceCache.cfg;
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(),8000);
+  try{
+    const res=await fetch(TURN_URL,{signal:ctrl.signal});
+    if(!res.ok)throw new Error('TURN '+res.status);
+    const j=await res.json();
+    if(!j.iceServers||!j.iceServers.length)throw new Error('no iceServers');
+    const cfg={iceServers:j.iceServers,iceTransportPolicy:'relay'};
+    _iceCache={cfg,exp:Date.now()+3600*1000};
+    return cfg;
+  }finally{clearTimeout(t);}
+}
+let _peerGen=0;
+async function initPeer(roomId){
+  const gen=++_peerGen;
   if(state.peer&&!state.peer.destroyed)state.peer.destroy();
-  state.peer=new Peer(roomId,{debug:0});
+  let ice;
+  try{ice=await getIceConfig();}
+  catch(e){
+    if(gen!==_peerGen)return;
+    console.warn('TURN取得失敗:',e);
+    setBadgeReconnecting();
+    toast('安全な接続の準備に失敗しました。再試行します');
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer=setTimeout(()=>initPeer(roomId),5000);
+    return;
+  }
+  if(gen!==_peerGen)return;
+  state.peer=new Peer(roomId,{debug:0,config:ice});
   state.peer.on('open',id=>{
     clearTimeout(_reconnectTimer);
     if(!_roomCreated){showRoomInfo(id);toast('ルームを作成しました！');_roomCreated=true;}
@@ -858,6 +891,7 @@ function copyGuestUrl(){
 
 function closeRoom(){
   if(!confirm('ルームを閉じますか？'))return;
+  _peerGen++;
   clearTimeout(_reconnectTimer);
   if(state.peer){state.peer.destroy();state.peer=null;}
   state.connections={};state.roomId=null;_roomCreated=false;

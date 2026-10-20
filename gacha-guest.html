@@ -683,6 +683,25 @@ function clearConnectionTimer(){
   if(_connectTimer){clearTimeout(_connectTimer);_connectTimer=null;}
 }
 
+
+// ===== TURN（中継）設定：IPを隠すため通信を必ずTURN経由にする =====
+const TURN_URL='https://still-math-2428.yonagirei0214.workers.dev/'; // ← あなたのWorkerのURLに書き換える
+let _iceCache=null;
+async function getIceConfig(){
+  if(_iceCache&&Date.now()<_iceCache.exp)return _iceCache.cfg;
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(),8000);
+  try{
+    const res=await fetch(TURN_URL,{signal:ctrl.signal});
+    if(!res.ok)throw new Error('TURN '+res.status);
+    const j=await res.json();
+    if(!j.iceServers||!j.iceServers.length)throw new Error('no iceServers');
+    const cfg={iceServers:j.iceServers,iceTransportPolicy:'relay'};
+    _iceCache={cfg,exp:Date.now()+3600*1000};
+    return cfg;
+  }finally{clearTimeout(t);}
+}
+
 function connect(){
   clearConnectionTimer();
   if(_reconnectTimer){clearTimeout(_reconnectTimer);_reconnectTimer=null;}
@@ -706,8 +725,19 @@ function connect(){
     return;
   }
 
+  getIceConfig().then(ice=>{
+    if(generation!==_connectionGeneration)return;
+    startPeer(generation,ice);
+  }).catch(err=>{
+    if(generation!==_connectionGeneration)return;
+    console.warn('TURN取得失敗:',err);
+    handleConnectionFailure('安全な接続の準備に失敗しました。',generation);
+  });
+}
+
+function startPeer(generation,ice){
   let peer;
-  try{peer=new window.Peer({debug:0});}
+  try{peer=new window.Peer({debug:0,config:ice});}
   catch(err){handleConnectionFailure('接続を開始できませんでした: '+(err?.message||err),generation);return;}
   st.peer=peer;
 
