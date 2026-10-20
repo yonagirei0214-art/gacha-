@@ -768,7 +768,7 @@ function connect(){
   }).catch(err=>{
     if(generation!==_connectionGeneration)return;
     console.warn('TURN取得失敗:',err);
-    handleConnectionFailure('安全な接続の準備に失敗しました。',generation);
+    handleConnectionFailure('安全な接続の準備に失敗しました。('+(err&&err.message?err.message:err)+')',generation);
   });
 }
 

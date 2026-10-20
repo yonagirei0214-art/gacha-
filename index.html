@@ -862,7 +862,7 @@ async function initPeer(roomId){
     if(gen!==_peerGen)return;
     console.warn('TURN取得失敗:',e);
     setBadgeReconnecting();
-    toast('安全な接続の準備に失敗しました。再試行します');
+    toast('安全な接続の準備に失敗しました('+(e&&e.message?e.message:e)+')。再試行します');
     clearTimeout(_reconnectTimer);
     _reconnectTimer=setTimeout(()=>initPeer(roomId),5000);
     return;
